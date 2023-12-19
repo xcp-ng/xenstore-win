@@ -1,0 +1,13 @@
+[package]
+name = "xenstore-win"
+version = "0.0.1-dev"
+authors = ["Yann Dirson <yann.dirson@vates.fr>"]
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde = "1.0.193"
+wmi = { version = "0.13.1" }
+
+[dev-dependencies]
+clap = { version = "4.1.4", features = ["derive"] }

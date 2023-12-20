@@ -1,3 +1,5 @@
+mod wmi_extra;
+
 use serde::Deserialize;
 use std::error::Error;
 use std::io::{Error as IoError};
@@ -46,6 +48,9 @@ impl Xs {
         let xs_base = &ret[0];
 
         eprintln!("Found xenstore: {} {}", xs_base.instance_name, xs_base.__Path);
+
+        // ret ...> session id
+        let ret = wmi_extra::add_session(&wmi_connection, &xs_base);
 
         Ok(Xs {
             wmi_connection,

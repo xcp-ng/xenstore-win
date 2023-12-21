@@ -50,7 +50,7 @@ impl Xs {
         eprintln!("Found xenstore: {} {}", xs_base.instance_name, xs_base.__path);
 
         // ret ...> session id
-        let ret = wmi_extra::add_session(&wmi_connection, &xs_base);
+        let ret = wmi_extra::add_session(&wmi_connection, &xs_base)?;
 
         Ok(Xs {
             wmi_connection,

@@ -1,10 +1,14 @@
 use windows::core::{BSTR, w};
-use windows::Win32::System::Wmi::{
-    //IWbemClassObject,
-    //IWbemServices,
-    WBEM_FLAG_RETURN_WBEM_COMPLETE,
+use windows::Win32::System::{
+    Com::VARIANT,
+    Wmi::{
+        IWbemClassObject,
+        //IWbemServices,
+        WBEM_FLAG_RETURN_WBEM_COMPLETE,
+    },
 };
-use wmi::{WMIConnection, WMIError, WMIResult};
+use wmi::{Variant, WMIConnection, WMIError, WMIResult};
+
 fn type_of<T>(_: &T) -> String{
     format!("{}", std::any::type_name::<T>())
 }
@@ -50,6 +54,18 @@ pub fn add_session(cnx: &WMIConnection,
         eprintln!("ExecMethod -> {} = {:?}", type_of(&ret), ret);
         ret.expect("ExecMethod failure");
     }
+
+    eprintln!("out_params: {:?}", out_params);
+    let out_params = out_params.expect("AddSession should have output params");
+
+    let mut addsession_ret = VARIANT::default();
+    unsafe {
+        let ret = out_params.Get(w!("ReturnValue"), 0, &mut addsession_ret, None, None);
+        eprintln!("Get -> {} = {:?}", type_of(&ret), ret);
+        ret.expect("Get failure");
+    }
+    let sid = Variant::from_variant(&addsession_ret)?;
+    eprintln!("sid: {:#?}", sid);
 
     Ok(0)
 }

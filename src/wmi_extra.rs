@@ -27,13 +27,14 @@ pub fn add_session(cnx: &WMIConnection,
     let wmi_object = wmi_object.ok_or(WMIError::NullPointerResult)?;
     eprintln!("wmi_object: {}", type_of(&wmi_object));
 
-    let mut in_params = None;
-    let mut out_params = None;
-    unsafe {
-        let ret = wmi_object.GetMethod(w!("AddSession"), 0, &mut in_params, &mut out_params);
-        eprintln!("GetMethod -> {} = {:?}", type_of(&ret), ret);
-        ret.expect("GetMethod failure");
-    }
+    //let mut in_params: Option<IWbemClassObject> = None;
+    let mut out_params: Option<IWbemClassObject> = None;
+
+//    unsafe {
+//        let ret = wmi_object.GetMethod(w!("AddSession"), 0, &mut in_params, &mut out_params);
+//        eprintln!("GetMethod -> {} = {:?}", type_of(&ret), ret);
+//        ret.expect("GetMethod failure");
+//    }
 
     unsafe {
         let ret = cnx.svc.ExecMethod(

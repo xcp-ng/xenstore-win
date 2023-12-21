@@ -10,7 +10,7 @@ pub fn add_session(cnx: &WMIConnection,
                    object: &crate::CitrixXenStoreBase) -> WMIResult<usize>
 {
     let mut wmi_object = None;
-    let object_path: &str = object.__Path.as_str();
+    let object_path: &str = object.__path.as_str();
     let object_path = BSTR::from(object_path);
     unsafe {
         cnx.svc.GetObject(&object_path,
@@ -29,11 +29,11 @@ pub fn add_session(cnx: &WMIConnection,
 
     unsafe {
         cnx.svc.ExecMethod(
-            &BSTR::from(&object.__Path),
+            &BSTR::from(&object.__path),
             &BSTR::from("AddSession"),
             0,
             None,
-            None, //Some(& in_params),
+            None, //in_params,
             Some(&mut out_params),
             None,
         )?;

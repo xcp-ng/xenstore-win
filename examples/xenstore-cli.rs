@@ -46,9 +46,9 @@ enum Command {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let _cli = Cli::parse();
 
-    let xs = Xs::new(XsOpenFlags::ReadOnly).expect("xenstore should open");
+    let _xs = Xs::new(XsOpenFlags::ReadOnly).expect("xenstore should open");
 
 //    match cli.command {
 //        Command::List { path } => cmd_list(&xs, &path),
@@ -68,10 +68,10 @@ fn main() {
 //    }
 //}
 
-fn cmd_read(xs: &Xs, path: &String) {
-    let value = xs.read(None, &path).expect("path should be readable");
-    println!("{}", value);
-}
+//fn cmd_read(xs: &Xs, path: &String) {
+//    let value = xs.read(None, &path).expect("path should be readable");
+//    println!("{}", value);
+//}
 
 //fn cmd_rm(xs: &Xs, path: &String) {
 //    xs.rm(None, &path).expect("cannot rm xenstore path");

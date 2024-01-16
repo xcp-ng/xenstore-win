@@ -3,7 +3,7 @@ pub mod wmi_extra;
 use std::error::Error;
 use std::io::{Error as IoError};
 use std::num::NonZeroU32;
-use windows::core::BSTR;
+use windows::core::{BSTR, VARIANT};
 use windows::Win32::System::Wmi;
 
 pub struct XBTransaction(NonZeroU32);
@@ -16,6 +16,9 @@ pub enum XsOpenFlags {
 
 pub struct Xs {
     wmi_service: Wmi::IWbemServices,
+    xenstore_base_class: Wmi::IWbemClassObject,
+    //xenstore_base_singleton: Wmi::IWbemClassObject,
+    xenstore_base_path: BSTR,
 }
 
 //#[derive(Deserialize, Debug)]
@@ -39,14 +42,13 @@ pub struct Xs {
 
 impl Xs {
     pub fn new(_open_type: XsOpenFlags) -> Result<Self, Box<dyn Error>> {
-        // py: wmi.WMI(namespace="root\\wmi")
         let wmi_service = wmi_extra::wmi_init(r#"root\wmi"#)?;
 
-        // py: .CitrixXenStoreBase()[0]
+        // get all instances of .CitrixXenStoreBase
         let enumerator = unsafe {
             wmi_service.ExecQuery(
                 &BSTR::from("WQL"),
-                &BSTR::from("SELECT __Path, InstanceName FROM CitrixXenStoreBase"),
+                &BSTR::from("SELECT __Path FROM CitrixXenStoreBase"),
                 Wmi::WBEM_FLAG_FORWARD_ONLY | Wmi::WBEM_FLAG_RETURN_IMMEDIATELY,
                 None,
             )
@@ -59,15 +61,22 @@ impl Xs {
         if let Err(e) = res.ok() {
             return Err(e.into());
         }
-        // get the singleton
-        let xs_base = objs.into_iter().next().unwrap().unwrap();
-        let xs_base_class = wmi_extra::wmi_get_object(&wmi_service, "CitrixXenStoreBase")?;
+        // get the singleton instance
+        let xenstore_base_singleton = objs.into_iter().next().unwrap().unwrap();
 
+        let mut xenstore_base_path = VARIANT::default();
+        unsafe { xenstore_base_singleton
+                 .Get(&BSTR::from("__Path"), 0, &mut xenstore_base_path, None, None) }?;
+        let xenstore_base_path = BSTR::try_from(&xenstore_base_path)?;
+
+        let xenstore_base_class = wmi_extra::wmi_get_object(&wmi_service, "CitrixXenStoreBase")?;
         // ret ...> session id
-        let ret = wmi_extra::add_session(&wmi_service, &xs_base, &xs_base_class)?;
+        let ret = wmi_extra::add_session(&wmi_service, &xenstore_base_class, &xenstore_base_path)?;
 
         Ok(Xs {
             wmi_service,
+            xenstore_base_class,
+            xenstore_base_path,
         })
     }
 //    pub fn read(&self, transaction: Option<XBTransaction>, path: &str) -> Result<String, IoError> {

@@ -65,13 +65,9 @@ fn type_of<T>(_: &T) -> String{
 }
 
 pub fn add_session(svc: &Wmi::IWbemServices,
-                   xs_base: &Wmi::IWbemClassObject,
-                   xs_base_class: &Wmi::IWbemClassObject) -> Result<u32, WinError>
+                   xs_base_class: &Wmi::IWbemClassObject,
+                   xs_base_path: &BSTR) -> Result<u32, WinError>
 {
-    let mut var = VARIANT::default();
-    unsafe { xs_base.Get(&BSTR::from("__Path"), 0, &mut var, None, None) }?;
-    let xs_base_path = BSTR::try_from(&var)?;
-
     // get input params def
     let mut in_params_class: Option<Wmi::IWbemClassObject> = None;
     unsafe { xs_base_class.GetMethod(w!("AddSession"), 0,
@@ -85,7 +81,7 @@ pub fn add_session(svc: &Wmi::IWbemServices,
     // method call
     let mut out_params = None;
     unsafe { svc.ExecMethod(
-        &xs_base_path,
+        xs_base_path,
         &BSTR::from("AddSession"),
         Default::default(),
         None,
@@ -95,6 +91,7 @@ pub fn add_session(svc: &Wmi::IWbemServices,
     ) }?;
     let out_params = out_params.unwrap();
 
+    // output params
     let mut sid = VARIANT::default();
     unsafe { out_params.Get(w!("SessionId"), 0, &mut sid, None, None) }?;
     let sid = u32::try_from(&sid)?;

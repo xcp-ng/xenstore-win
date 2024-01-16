@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 [dependencies.windows]
 #version = "0.52.0"
 git = "https://github.com/microsoft/windows-rs/"
+rev = "60f9e456952f9ef46aaf603cdde0a05e2e8a7de7"
 features = [
     "Win32_Security",
     "Win32_System_Com",

@@ -1,10 +1,10 @@
-mod wmi_extra;
+pub mod wmi_extra;
 
-use serde::Deserialize;
 use std::error::Error;
 use std::io::{Error as IoError};
 use std::num::NonZeroU32;
-use wmi::{COMLibrary, WMIConnection};
+use windows::core::BSTR;
+use windows::Win32::System::Wmi;
 
 pub struct XBTransaction(NonZeroU32);
 
@@ -15,16 +15,16 @@ pub enum XsOpenFlags {
 }
 
 pub struct Xs {
-    wmi_connection: WMIConnection,
+    wmi_service: Wmi::IWbemServices,
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
-struct CitrixXenStoreBase {
-    #[serde(rename = "__Path")]
-    __path: String,
-    instance_name: String,
-}
+//#[derive(Deserialize, Debug)]
+//#[serde(rename_all = "PascalCase")]
+//struct CitrixXenStoreBase {
+//    #[serde(rename = "__Path")]
+//    __path: String,
+//    instance_name: String,
+//}
 
 //#[derive(Deserialize, Debug)]
 //#[serde(rename_all = "PascalCase")]
@@ -40,20 +40,37 @@ struct CitrixXenStoreBase {
 impl Xs {
     pub fn new(_open_type: XsOpenFlags) -> Result<Self, Box<dyn Error>> {
         // py: wmi.WMI(namespace="root\\wmi")
-        let wmi_connection = WMIConnection::with_namespace_path(r#"root\wmi"#,
-                                                                COMLibrary::new()?)?;
-        eprintln!("WMI opened: {:p}", &wmi_connection);
-        // py: .CitrixXenStoreBase()[0]
-        let ret: Vec<CitrixXenStoreBase> = wmi_connection.query()?;
-        let xs_base = &ret[0];
+        let wmi_service = wmi_extra::wmi_init(r#"root\wmi"#)?;
 
-        eprintln!("Found xenstore: {} {}", xs_base.instance_name, xs_base.__path);
+        // py: .CitrixXenStoreBase()[0]
+//        let enumerator = unsafe {
+//            wmi_service.ExecQuery(
+//                &BSTR::from("WQL"),
+//                &BSTR::from("SELECT __Path, InstanceName FROM CitrixXenStoreBase"),
+//                Wmi::WBEM_FLAG_FORWARD_ONLY | Wmi::WBEM_FLAG_RETURN_IMMEDIATELY,
+//                None,
+//            )
+//        }?;
+//        eprintln!("enumerator = {enumerator:?}");
+//        let mut objs = [None; 1];
+//        let res = {
+//            let mut return_value = 0;
+//            unsafe { enumerator.Next(Wmi::WBEM_INFINITE, &mut objs, &mut return_value) }
+//        };
+//        if let Err(e) = res.ok() {
+//            return Err(e.into());
+//        }
+//        eprintln!("objs = {objs:?}");
+//        let xs_base = objs.into_iter().next().unwrap().unwrap(); // FIXME
+
+        let xs_base = wmi_extra::wmi_get_object(&wmi_service, "CitrixXenStoreBase")?;
+        eprintln!("Found xenstore: {xs_base:?}");
 
         // ret ...> session id
-        let ret = wmi_extra::add_session(&wmi_connection, &xs_base)?;
+        let ret = wmi_extra::add_session(&wmi_service, &xs_base)?;
 
         Ok(Xs {
-            wmi_connection,
+            wmi_service,
         })
     }
 //    pub fn read(&self, transaction: Option<XBTransaction>, path: &str) -> Result<String, IoError> {

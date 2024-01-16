@@ -43,31 +43,28 @@ impl Xs {
         let wmi_service = wmi_extra::wmi_init(r#"root\wmi"#)?;
 
         // py: .CitrixXenStoreBase()[0]
-//        let enumerator = unsafe {
-//            wmi_service.ExecQuery(
-//                &BSTR::from("WQL"),
-//                &BSTR::from("SELECT __Path, InstanceName FROM CitrixXenStoreBase"),
-//                Wmi::WBEM_FLAG_FORWARD_ONLY | Wmi::WBEM_FLAG_RETURN_IMMEDIATELY,
-//                None,
-//            )
-//        }?;
-//        eprintln!("enumerator = {enumerator:?}");
-//        let mut objs = [None; 1];
-//        let res = {
-//            let mut return_value = 0;
-//            unsafe { enumerator.Next(Wmi::WBEM_INFINITE, &mut objs, &mut return_value) }
-//        };
-//        if let Err(e) = res.ok() {
-//            return Err(e.into());
-//        }
-//        eprintln!("objs = {objs:?}");
-//        let xs_base = objs.into_iter().next().unwrap().unwrap(); // FIXME
-
-        let xs_base = wmi_extra::wmi_get_object(&wmi_service, "CitrixXenStoreBase")?;
-        eprintln!("Found xenstore: {xs_base:?}");
+        let enumerator = unsafe {
+            wmi_service.ExecQuery(
+                &BSTR::from("WQL"),
+                &BSTR::from("SELECT __Path, InstanceName FROM CitrixXenStoreBase"),
+                Wmi::WBEM_FLAG_FORWARD_ONLY | Wmi::WBEM_FLAG_RETURN_IMMEDIATELY,
+                None,
+            )
+        }?;
+        let mut objs = [None; 1];
+        let res = {
+            let mut return_value = 0;
+            unsafe { enumerator.Next(Wmi::WBEM_INFINITE, &mut objs, &mut return_value) }
+        };
+        if let Err(e) = res.ok() {
+            return Err(e.into());
+        }
+        // get the singleton
+        let xs_base = objs.into_iter().next().unwrap().unwrap();
+        let xs_base_class = wmi_extra::wmi_get_object(&wmi_service, "CitrixXenStoreBase")?;
 
         // ret ...> session id
-        let ret = wmi_extra::add_session(&wmi_service, &xs_base)?;
+        let ret = wmi_extra::add_session(&wmi_service, &xs_base, &xs_base_class)?;
 
         Ok(Xs {
             wmi_service,

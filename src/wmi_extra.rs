@@ -65,27 +65,27 @@ fn type_of<T>(_: &T) -> String{
 }
 
 pub fn add_session(svc: &Wmi::IWbemServices,
-                   xs_base: &Wmi::IWbemClassObject) -> Result<usize, WinError>
+                   xs_base: &Wmi::IWbemClassObject,
+                   xs_base_class: &Wmi::IWbemClassObject) -> Result<u32, WinError>
 {
+    let mut var = VARIANT::default();
+    unsafe { xs_base.Get(&BSTR::from("__Path"), 0, &mut var, None, None) }?;
+    let xs_base_path = BSTR::try_from(&var)?;
+
     // get input params def
-    eprintln!("calling GetMethod");
     let mut in_params_class: Option<Wmi::IWbemClassObject> = None;
-    unsafe { xs_base.GetMethod(w!("AddSession"), 0,
-                               &mut in_params_class, std::ptr::null_mut()) }?;
+    unsafe { xs_base_class.GetMethod(w!("AddSession"), 0,
+                                     &mut in_params_class, std::ptr::null_mut()) }?;
     let in_params_class = in_params_class.unwrap();
     // fill input params
-    eprintln!("calling SpawnInstance");
     let in_params = unsafe { in_params_class.SpawnInstance(0) }?;
     let var_session_name = VARIANT::from("MySession");
-    //let var_session_name = VARIANT::from(42);
-    eprintln!("var_session_name = {var_session_name:?}");
     unsafe { in_params.Put(w!("Id"), 0, &var_session_name, 0) }?;
 
     // method call
     let mut out_params = None;
-    eprintln!("calling ExecMethod");
     unsafe { svc.ExecMethod(
-        &BSTR::from("CitrixXenStoreBase"),
+        &xs_base_path,
         &BSTR::from("AddSession"),
         Default::default(),
         None,
@@ -93,15 +93,12 @@ pub fn add_session(svc: &Wmi::IWbemServices,
         Some(&mut out_params),
         None,
     ) }?;
-    eprintln!("called ExecMethod");
     let out_params = out_params.unwrap();
-    eprintln!("out_params = {out_params:?}");
 
     let mut sid = VARIANT::default();
     unsafe { out_params.Get(w!("SessionId"), 0, &mut sid, None, None) }?;
+    let sid = u32::try_from(&sid)?;
     eprintln!("sid: {:#?}", sid);
-    //let sid: u32 = &sid)?;
-    //eprintln!("sid: {:#?}", sid);
 
-    Ok(0)
+    Ok(sid)
 }

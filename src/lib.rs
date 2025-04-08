@@ -126,9 +126,8 @@ impl Xs for XsWindows {
         out_buffer.truncate(len as usize);
 
         Ok(parse_nul_list(&out_buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             .iter()
-            .map(|s| s.to_string().into_boxed_str())
+            .map(|s| String::from_utf8_lossy(*s).into_owned().into_boxed_str())
             .collect())
     }
 
@@ -149,15 +148,16 @@ impl Xs for XsWindows {
         )?;
         out_buffer.truncate(len as usize);
 
-        Ok(parse_nul_string(&out_buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .unwrap_or_default()
-            .to_string()
-            .into_boxed_str())
+        Ok(
+            String::from_utf8_lossy(parse_nul_string(&out_buffer).unwrap_or_default())
+                .into_owned()
+                .into_boxed_str(),
+        )
     }
 
     fn write(&self, path: &str, data: &str) -> io::Result<()> {
         let in_buffer = make_payload(&[path, data]);
+        log::debug!("in_buffer len {}", in_buffer.len());
 
         /* Write a value to XenStore
          *  Input: NUL-terminated CHAR array containing the requested key's path,

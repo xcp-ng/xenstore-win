@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use smol::Executor;
+use smol::{stream::StreamExt, Executor};
 use xenstore_rs::{AsyncWatch, AsyncXs};
 use xenstore_win::smol::XsSmolWindows;
 
@@ -87,7 +87,7 @@ async fn cmd_write(xs: &mut impl AsyncXs, path: &String, data: &String) {
 async fn cmd_watch<XS: AsyncXs + AsyncWatch>(xs: &mut XS, path: &String) {
     let mut stream = xs.watch(&path).await.expect("path should be watchable");
 
-    while let Some(entry) = stream.next().await {
+    while let Some(entry) = stream.try_next().await.unwrap() {
         println!("{entry}: {:?}", xs.read(&entry).await);
     }
 }

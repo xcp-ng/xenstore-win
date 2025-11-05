@@ -1,21 +1,14 @@
 //! Xeniface device discovery utilities.
-//! 
+//!
 use log::{error, warn};
 use windows::{
-    core::{Result, GUID},
     Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-        SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
-        SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
+        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList,
+        SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
     },
+    core::{GUID, Result},
 };
-
-pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
-    0xb2cfb085,
-    0xaa5e,
-    0x47e1,
-    [0x8b, 0xf7, 0x97, 0x93, 0xf3, 0x15, 0x45, 0x65],
-);
 
 const MAX_INTERFACE_DETAIL_PATH_LEN: usize = 4094;
 
@@ -66,7 +59,7 @@ impl DeviceInfoList {
         })
     }
 
-    pub fn iter(&self) -> DeviceInfoIterator {
+    pub fn iter(&'_ self) -> DeviceInfoIterator<'_> {
         DeviceInfoIterator {
             list: self,
             index: 0,

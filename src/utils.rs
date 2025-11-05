@@ -3,8 +3,11 @@
 ///
 use std::{
     io::Write,
+    os::windows::io::{FromRawHandle, OwnedHandle},
     str::{self},
 };
+
+use windows::{Win32::Foundation::HANDLE, core::Owned};
 
 pub fn make_payload(strings: &[&str]) -> Box<[u8]> {
     let mut payload: Vec<u8> = Vec::new();
@@ -39,4 +42,12 @@ pub fn parse_nul_list(buffer: &[u8]) -> Box<[&[u8]]> {
         .split_inclusive(|&c| c == 0)
         .filter_map(|s| parse_nul_string(s))
         .collect()
+}
+
+pub fn as_io_handle(mut handle: Owned<HANDLE>) -> OwnedHandle {
+    unsafe {
+        let raw = OwnedHandle::from_raw_handle(handle.0);
+        handle.0 = std::ptr::null_mut();
+        raw
+    }
 }

@@ -229,10 +229,11 @@ impl Xeniface {
     ) -> windows::core::Result<XenifaceStoreAddWatchOut> {
         let c_path = CString::new(path)
             .map_err(|_| windows::core::Error::from_hresult(ERROR_NOT_ENOUGH_MEMORY.into()))?;
+        let path_bytes = c_path.to_bytes_with_nul();
 
         let watch_in = XenifaceStoreAddWatchIn {
-            path: c_path.as_ptr(),
-            path_length: (c_path.count_bytes() + 1) as u32,
+            path: path_bytes.as_ptr() as *const c_char,
+            path_length: path_bytes.len() as u32,
             event: event,
         };
         let mut context = XenifaceStoreAddWatchOut {

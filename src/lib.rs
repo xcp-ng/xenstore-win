@@ -60,7 +60,7 @@ unsafe impl Send for WatchContext {}
 impl XsWindows {
     pub(crate) fn make_watch(&self, path: &str) -> io::Result<(Owned<HANDLE>, WatchContext)> {
         let event = unsafe { Owned::new(CreateEventW(None, true, false, None)?) };
-        let context = self.0.add_watch(path, *event)?;
+        let context = unsafe { self.0.add_watch(path, *event)? };
         Ok((event, WatchContext(context)))
     }
 
@@ -76,7 +76,7 @@ unsafe impl Send for SuspendContext {}
 impl XsWindows {
     pub(crate) fn make_suspend(&self) -> io::Result<(Owned<HANDLE>, SuspendContext)> {
         let event = unsafe { Owned::new(CreateEventW(None, true, false, None)?) };
-        let context = self.0.suspend_register(*event)?;
+        let context = unsafe { self.0.suspend_register(*event)? };
         Ok((event, SuspendContext(context)))
     }
 

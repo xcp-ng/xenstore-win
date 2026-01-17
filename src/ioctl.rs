@@ -135,7 +135,7 @@ impl Xeniface {
         }
     }
 
-    fn raw_ioctl(
+    unsafe fn raw_ioctl(
         &self,
         control_code: u32,
         in_buffer: &[u8],
@@ -160,7 +160,7 @@ impl Xeniface {
         Ok(len)
     }
 
-    fn ioctl<In, Out>(
+    unsafe fn ioctl<In, Out>(
         &self,
         control_code: u32,
         in_val: &In,
@@ -179,11 +179,13 @@ impl Xeniface {
         let in_buffer = make_payload(&[path]);
         let mut out_buffer = vec![0u8; 4096];
 
-        let len = self.raw_ioctl(
-            IOCTL_XENIFACE_STORE_DIRECTORY,
-            &in_buffer,
-            Some(&mut out_buffer),
-        )?;
+        let len = unsafe {
+            self.raw_ioctl(
+                IOCTL_XENIFACE_STORE_DIRECTORY,
+                &in_buffer,
+                Some(&mut out_buffer),
+            )?
+        };
         out_buffer.truncate(len as usize);
 
         Ok(parse_nul_list(&out_buffer)
@@ -196,7 +198,9 @@ impl Xeniface {
         let in_buffer = make_payload(&[path]);
         let mut out_buffer = vec![0u8; 4096];
 
-        let len = self.raw_ioctl(IOCTL_XENIFACE_STORE_READ, &in_buffer, Some(&mut out_buffer))?;
+        let len = unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_READ, &in_buffer, Some(&mut out_buffer))?
+        };
         out_buffer.truncate(len as usize);
 
         Ok(
@@ -209,7 +213,9 @@ impl Xeniface {
     pub fn store_write(&self, path: &str, data: &str) -> windows::core::Result<()> {
         let in_buffer = make_payload(&[path, data]);
 
-        self.raw_ioctl(IOCTL_XENIFACE_STORE_WRITE, &in_buffer, None)?;
+        unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_WRITE, &in_buffer, None)?;
+        }
 
         Ok(())
     }
@@ -217,12 +223,14 @@ impl Xeniface {
     pub fn store_remove(&self, path: &str) -> windows::core::Result<()> {
         let in_buffer = make_payload(&[path]);
 
-        self.raw_ioctl(IOCTL_XENIFACE_STORE_REMOVE, &in_buffer, None)?;
+        unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_REMOVE, &in_buffer, None)?;
+        }
 
         Ok(())
     }
 
-    pub fn add_watch<'a>(
+    pub unsafe fn add_watch<'a>(
         &'a self,
         path: &str,
         event: HANDLE,
@@ -240,11 +248,13 @@ impl Xeniface {
             context: std::ptr::null_mut(),
         };
 
-        self.ioctl(
-            IOCTL_XENIFACE_STORE_ADD_WATCH,
-            &watch_in,
-            Some(&mut context),
-        )?;
+        unsafe {
+            self.ioctl(
+                IOCTL_XENIFACE_STORE_ADD_WATCH,
+                &watch_in,
+                Some(&mut context),
+            )?;
+        }
 
         Ok(context)
     }
@@ -253,15 +263,17 @@ impl Xeniface {
         &self,
         context: &mut XenifaceStoreAddWatchOut,
     ) -> windows::core::Result<()> {
-        self.ioctl::<XenifaceStoreAddWatchOut, c_void>(
-            IOCTL_XENIFACE_STORE_REMOVE_WATCH,
-            context,
-            None,
-        )?;
+        unsafe {
+            self.ioctl::<XenifaceStoreAddWatchOut, c_void>(
+                IOCTL_XENIFACE_STORE_REMOVE_WATCH,
+                context,
+                None,
+            )?;
+        }
         Ok(())
     }
 
-    pub fn suspend_register<'a>(
+    pub unsafe fn suspend_register<'a>(
         &'a self,
         event: HANDLE,
     ) -> windows::core::Result<XenifaceStoreSuspendRegisterOut> {
@@ -270,11 +282,13 @@ impl Xeniface {
             context: std::ptr::null_mut(),
         };
 
-        self.ioctl(
-            IOCTL_XENIFACE_SUSPEND_REGISTER,
-            &suspend_in,
-            Some(&mut context.context),
-        )?;
+        unsafe {
+            self.ioctl(
+                IOCTL_XENIFACE_SUSPEND_REGISTER,
+                &suspend_in,
+                Some(&mut context.context),
+            )?;
+        }
 
         Ok(context)
     }
@@ -283,11 +297,13 @@ impl Xeniface {
         &self,
         context: &mut XenifaceStoreSuspendRegisterOut,
     ) -> windows::core::Result<()> {
-        self.ioctl::<XenifaceStoreSuspendRegisterOut, c_void>(
-            IOCTL_XENIFACE_SUSPEND_DEREGISTER,
-            context,
-            None,
-        )?;
+        unsafe {
+            self.ioctl::<XenifaceStoreSuspendRegisterOut, c_void>(
+                IOCTL_XENIFACE_SUSPEND_DEREGISTER,
+                context,
+                None,
+            )?;
+        }
         Ok(())
     }
 }

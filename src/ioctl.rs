@@ -232,7 +232,7 @@ impl Xeniface {
 
         let watch_in = XenifaceStoreAddWatchIn {
             path: c_path.as_ptr(),
-            path_length: c_path.count_bytes() as u32,
+            path_length: (c_path.count_bytes() + 1) as u32,
             event: event,
         };
         let mut context = XenifaceStoreAddWatchOut {

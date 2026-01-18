@@ -39,7 +39,7 @@ impl ExtendedDataDetail {
 }
 
 /// Set of device sharing the GUID.
-pub struct DeviceInfoList {
+pub(crate) struct DeviceInfoList {
     info: HDEVINFO,
     class_guid: GUID,
 }
@@ -76,7 +76,7 @@ impl Drop for DeviceInfoList {
     }
 }
 
-pub struct DeviceInfoIterator<'a> {
+pub(crate) struct DeviceInfoIterator<'a> {
     list: &'a DeviceInfoList,
     index: u32,
     buffer: Box<ExtendedDataDetail>,

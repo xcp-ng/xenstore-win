@@ -1,31 +1,28 @@
-use std::ffi::{CString, c_char, c_ulong, c_void};
+use std::{
+    ffi::{CString, c_char, c_ulong, c_void},
+    sync::{Arc, Mutex, MutexGuard, Weak},
+};
 
-use log::{debug, warn};
 use windows::{
     Win32::{
-        Foundation::{
-            DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_FOUND,
-            GENERIC_READ, GENERIC_WRITE, HANDLE,
-        },
-        Storage::FileSystem::{
-            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
-        },
+        Devices::DeviceAndDriverInstallation::*,
+        Foundation::{ERROR_INVALID_HANDLE, ERROR_NOT_ENOUGH_MEMORY, HANDLE},
         System::{
             IO::DeviceIoControl,
             Ioctl::{FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED},
-            Threading::GetCurrentProcess,
         },
     },
-    core::{GUID, Owned, PCWSTR},
+    core::{GUID, Owned},
 };
 
 use crate::{
+    cm::CmNotifier,
     device::DeviceInfoList,
+    multiplex::MultiplexedXeniface,
     utils::{make_payload, parse_nul_list, parse_nul_string},
 };
 
-const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
+pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
     0xb2cfb085,
     0xaa5e,
     0x47e1,
@@ -61,6 +58,8 @@ struct XenifaceStoreAddWatchIn {
 pub(crate) struct XenifaceStoreAddWatchOut {
     context: *const c_void,
 }
+unsafe impl Send for XenifaceStoreAddWatchOut {}
+unsafe impl Sync for XenifaceStoreAddWatchOut {}
 
 const IOCTL_XENIFACE_STORE_ADD_WATCH: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS);
@@ -77,6 +76,8 @@ struct XenifaceStoreSuspendRegisterIn {
 pub(crate) struct XenifaceStoreSuspendRegisterOut {
     context: *const c_void,
 }
+unsafe impl Send for XenifaceStoreSuspendRegisterOut {}
+unsafe impl Sync for XenifaceStoreSuspendRegisterOut {}
 
 const IOCTL_XENIFACE_SUSPEND_REGISTER: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, 0x831, METHOD_BUFFERED, FILE_ANY_ACCESS);
@@ -84,55 +85,66 @@ const IOCTL_XENIFACE_SUSPEND_REGISTER: u32 =
 const IOCTL_XENIFACE_SUSPEND_DEREGISTER: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, 0x832, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
-pub(crate) struct Xeniface(Owned<HANDLE>);
+pub(crate) struct Xeniface {
+    pub(crate) parent: Weak<MultiplexedXeniface>,
+    handle: Mutex<Option<Owned<HANDLE>>>,
+    _cm: CmNotifier<Xeniface>,
+}
+unsafe impl Send for Xeniface {}
+unsafe impl Sync for Xeniface {}
 
 impl Xeniface {
-    pub fn new() -> windows::core::Result<Self> {
+    pub(crate) fn enumerate() -> windows::core::Result<DeviceInfoList> {
         // Try all devices with XENIFACE class.
-        let dev_list = DeviceInfoList::new(GUID_INTERFACE_XENIFACE).unwrap();
-
-        for raw_wpath in dev_list.iter() {
-            let wpath = PCWSTR::from_raw(raw_wpath.as_ptr());
-            debug!("Trying {}", unsafe { wpath.display() });
-
-            match unsafe {
-                CreateFileW(
-                    wpath,
-                    (GENERIC_READ | GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAGS_AND_ATTRIBUTES::default(),
-                    None,
-                )
-            } {
-                Ok(file) => {
-                    debug!("Got {file:?}");
-                    return Ok(Self(unsafe { Owned::new(file) }));
-                }
-                Err(e) => {
-                    warn!("Unable to open {} ({e})", unsafe { wpath.display() })
-                }
-            }
-        }
-
-        return Err(ERROR_NOT_FOUND.into());
+        DeviceInfoList::new(GUID_INTERFACE_XENIFACE)
     }
 
-    pub fn try_clone(&self) -> windows::core::Result<Self> {
-        unsafe {
-            let mut new_handle = HANDLE::default();
-            DuplicateHandle(
-                GetCurrentProcess(),
-                *self.0,
-                GetCurrentProcess(),
-                &mut new_handle,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )?;
-            Ok(Self(Owned::new(new_handle)))
-        }
+    pub(crate) fn new(
+        child: &Weak<Xeniface>,
+        parent: Weak<MultiplexedXeniface>,
+        handle: Owned<HANDLE>,
+        callback: PCM_NOTIFY_CALLBACK,
+    ) -> windows::core::Result<Self> {
+        let context = child
+            .upgrade()
+            .ok_or(windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+        let cm = Self::register(context, *handle, callback)?;
+
+        Ok(Self {
+            parent,
+            handle: Mutex::new(Some(handle)),
+            _cm: cm,
+        })
+    }
+
+    fn register(
+        context: Arc<Xeniface>,
+        handle: HANDLE,
+        callback: PCM_NOTIFY_CALLBACK,
+    ) -> windows::core::Result<CmNotifier<Xeniface>> {
+        let filter = CM_NOTIFY_FILTER {
+            cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
+            FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
+            u: CM_NOTIFY_FILTER_0 {
+                DeviceHandle: CM_NOTIFY_FILTER_0_1 { hTarget: handle },
+            },
+            ..Default::default()
+        };
+
+        CmNotifier::<Xeniface>::new(&filter, context, callback)
+    }
+
+    pub fn lock(&self) -> windows::core::Result<MutexGuard<'_, Option<Owned<HANDLE>>>> {
+        let state = self
+            .handle
+            .lock()
+            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+        Ok(state)
+    }
+
+    pub fn is_active(&self) -> windows::core::Result<bool> {
+        let state = self.lock()?;
+        Ok(state.is_some())
     }
 
     unsafe fn raw_ioctl(
@@ -142,11 +154,16 @@ impl Xeniface {
         out_buffer: Option<&mut [u8]>,
     ) -> windows::core::Result<u32> {
         let mut len = 0;
-        let out_buffer_len = out_buffer.as_deref().map_or(0, size_of_val) as u32;
+        let out_buffer_len = out_buffer.as_deref().map_or(0, |s| s.len()) as u32;
+
+        let lock = self.lock()?;
+        let handle = lock
+            .as_ref()
+            .ok_or(windows::core::Error::from(ERROR_INVALID_HANDLE))?;
 
         unsafe {
             DeviceIoControl(
-                *self.0,
+                **handle,
                 control_code,
                 Some(in_buffer.as_ptr().cast()),
                 in_buffer.len() as u32,

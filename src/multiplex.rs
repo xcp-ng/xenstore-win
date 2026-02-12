@@ -183,7 +183,7 @@ impl MultiplexedXeniface {
             let result = Xeniface::new(child, self.me.clone()).unwrap();
             result
         });
-        result.register(handle, Some(Self::listener_callback))?;
+        result.register(handle, Self::listener_callback)?;
         Ok(result)
     }
 
@@ -254,7 +254,7 @@ impl MultiplexedXeniface {
         let _cr = CmNotifier::<Self>::new(
             &filter,
             self.me.upgrade().unwrap().clone(),
-            Some(Self::worker_cm_callback),
+            Self::worker_cm_callback,
         )?;
 
         {

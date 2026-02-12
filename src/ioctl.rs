@@ -19,7 +19,7 @@ use crate::{
     cm::CmNotifier,
     device::DeviceInfoList,
     multiplex::MultiplexedXeniface,
-    utils::{make_payload, parse_nul_list, parse_nul_string},
+    utils::{Unwrapped, make_payload, parse_nul_list, parse_nul_string},
 };
 
 pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
@@ -114,7 +114,7 @@ impl Xeniface {
     pub(crate) fn register(
         &self,
         handle: Owned<HANDLE>,
-        callback: PCM_NOTIFY_CALLBACK,
+        callback: <PCM_NOTIFY_CALLBACK as Unwrapped>::Inner,
     ) -> windows::core::Result<()> {
         let context = self.me.upgrade().unwrap();
 

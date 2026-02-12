@@ -51,3 +51,15 @@ pub fn as_io_handle(mut handle: Owned<HANDLE>) -> OwnedHandle {
         raw
     }
 }
+
+pub(crate) trait Unwrapped {
+    type Inner;
+}
+
+impl<T> Unwrapped for Option<T> {
+    type Inner = T;
+}
+
+impl<T, E> Unwrapped for Result<T, E> {
+    type Inner = T;
+}

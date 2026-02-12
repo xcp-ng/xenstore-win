@@ -5,6 +5,8 @@ use windows::{
     core::{HRESULT, Owned},
 };
 
+use crate::utils::Unwrapped;
+
 struct DerefedArcPtr<T>(*const T);
 
 impl<T> DerefedArcPtr<T> {
@@ -30,7 +32,7 @@ impl<T: Send + Sync> CmNotifier<T> {
     pub fn new(
         filter: &CM_NOTIFY_FILTER,
         context: Arc<T>,
-        callback: PCM_NOTIFY_CALLBACK,
+        callback: <PCM_NOTIFY_CALLBACK as Unwrapped>::Inner,
     ) -> windows::core::Result<Self> {
         let mut listener = Owned::<HCMNOTIFICATION>::default();
         let ptr = DerefedArcPtr::new(context);
@@ -38,7 +40,7 @@ impl<T: Send + Sync> CmNotifier<T> {
             match CM_Register_Notification(
                 filter,
                 Some(ptr.0 as *const c_void),
-                callback,
+                Some(callback),
                 listener.deref_mut(),
             ) {
                 CR_SUCCESS => Ok(Self {

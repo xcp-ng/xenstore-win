@@ -167,9 +167,9 @@ impl MultiplexedXeniface {
         }
     }
 
-    fn open_raw(wpath: PCWSTR) -> windows::core::Result<Owned<HANDLE>> {
-        unsafe {
-            CreateFileW(
+    fn open_raw(&self, wpath: PCWSTR) -> windows::core::Result<Arc<Xeniface>> {
+        let handle = unsafe {
+            Owned::new(CreateFileW(
                 wpath,
                 (GENERIC_READ | GENERIC_WRITE).0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -177,9 +177,14 @@ impl MultiplexedXeniface {
                 OPEN_EXISTING,
                 FILE_FLAGS_AND_ATTRIBUTES::default(),
                 None,
-            )
-            .map(|h| Owned::new(h))
-        }
+            )?)
+        };
+        let result = Arc::new_cyclic(|child: &Weak<Xeniface>| {
+            let result = Xeniface::new(child, self.me.clone()).unwrap();
+            result
+        });
+        result.register(handle, Some(Self::listener_callback))?;
+        Ok(result)
     }
 
     fn open(&self, paths: &Vec<Box<[u16]>>) -> windows::core::Result<Arc<Xeniface>> {
@@ -187,17 +192,9 @@ impl MultiplexedXeniface {
             let wpath = PCWSTR::from_raw(raw_wpath.as_ptr());
             log::debug!("Trying {}", unsafe { wpath.display() });
 
-            match Self::open_raw(wpath) {
-                Ok(handle) => {
-                    return Ok(Arc::new_cyclic(|child: &Weak<Xeniface>| {
-                        Xeniface::new(
-                            child,
-                            self.me.clone(),
-                            handle,
-                            Some(Self::listener_callback),
-                        )
-                        .unwrap()
-                    }));
+            match self.open_raw(wpath) {
+                Ok(xeniface) => {
+                    return Ok(xeniface);
                 }
                 Err(e) => {
                     log::warn!("Unable to open {} ({e})", unsafe { wpath.display() })

@@ -1,6 +1,6 @@
 use std::{
     ffi::{CString, c_char, c_ulong, c_void},
-    sync::{Arc, Mutex, MutexGuard, Weak},
+    sync::{Mutex, MutexGuard, Weak},
 };
 
 use windows::{
@@ -86,9 +86,10 @@ const IOCTL_XENIFACE_SUSPEND_DEREGISTER: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, 0x832, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
 pub(crate) struct Xeniface {
+    me: Weak<Xeniface>,
     pub(crate) parent: Weak<MultiplexedXeniface>,
-    handle: Mutex<Option<Owned<HANDLE>>>,
-    _cm: CmNotifier<Xeniface>,
+    // The handle must be closed before the notifier
+    state: Mutex<Option<(Owned<HANDLE>, CmNotifier<Xeniface>)>>,
 }
 unsafe impl Send for Xeniface {}
 unsafe impl Sync for Xeniface {}
@@ -100,43 +101,45 @@ impl Xeniface {
     }
 
     pub(crate) fn new(
-        child: &Weak<Xeniface>,
+        child: &Weak<Self>,
         parent: Weak<MultiplexedXeniface>,
-        handle: Owned<HANDLE>,
-        callback: PCM_NOTIFY_CALLBACK,
     ) -> windows::core::Result<Self> {
-        let context = child
-            .upgrade()
-            .ok_or(windows::core::Error::from(ERROR_INVALID_HANDLE))?;
-        let cm = Self::register(context, *handle, callback)?;
-
         Ok(Self {
+            me: child.clone(),
             parent,
-            handle: Mutex::new(Some(handle)),
-            _cm: cm,
+            state: Mutex::new(None),
         })
     }
 
-    fn register(
-        context: Arc<Xeniface>,
-        handle: HANDLE,
+    pub(crate) fn register(
+        &self,
+        handle: Owned<HANDLE>,
         callback: PCM_NOTIFY_CALLBACK,
-    ) -> windows::core::Result<CmNotifier<Xeniface>> {
+    ) -> windows::core::Result<()> {
+        let context = self.me.upgrade().unwrap();
+
+        let mut state = self.lock()?;
+        assert!(state.is_none());
+
         let filter = CM_NOTIFY_FILTER {
             cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
             FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
             u: CM_NOTIFY_FILTER_0 {
-                DeviceHandle: CM_NOTIFY_FILTER_0_1 { hTarget: handle },
+                DeviceHandle: CM_NOTIFY_FILTER_0_1 { hTarget: *handle },
             },
             ..Default::default()
         };
 
-        CmNotifier::<Xeniface>::new(&filter, context, callback)
+        let cm = CmNotifier::<Xeniface>::new(&filter, context, callback)?;
+        state.replace((handle, cm));
+        Ok(())
     }
 
-    pub fn lock(&self) -> windows::core::Result<MutexGuard<'_, Option<Owned<HANDLE>>>> {
+    pub fn lock(
+        &self,
+    ) -> windows::core::Result<MutexGuard<'_, Option<(Owned<HANDLE>, CmNotifier<Xeniface>)>>> {
         let state = self
-            .handle
+            .state
             .lock()
             .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
         Ok(state)
@@ -163,7 +166,7 @@ impl Xeniface {
 
         unsafe {
             DeviceIoControl(
-                **handle,
+                *(*handle).0,
                 control_code,
                 Some(in_buffer.as_ptr().cast()),
                 in_buffer.len() as u32,

@@ -3,11 +3,12 @@
 ///
 use std::{
     io::Write,
-    os::windows::io::{FromRawHandle, OwnedHandle},
+    ops::{Deref, DerefMut},
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, RawHandle},
     str::{self},
 };
 
-use windows::{Win32::Foundation::HANDLE, core::Owned};
+use windows::{Win32::Foundation::HANDLE, core::Free};
 
 pub fn make_payload(strings: &[&str]) -> Box<[u8]> {
     let mut payload: Vec<u8> = Vec::new();
@@ -44,14 +45,6 @@ pub fn parse_nul_list(buffer: &[u8]) -> Box<[&[u8]]> {
         .collect()
 }
 
-pub fn as_io_handle(mut handle: Owned<HANDLE>) -> OwnedHandle {
-    unsafe {
-        let raw = OwnedHandle::from_raw_handle(handle.0);
-        handle.0 = std::ptr::null_mut();
-        raw
-    }
-}
-
 pub(crate) trait Unwrapped {
     type Inner;
 }
@@ -62,4 +55,57 @@ impl<T> Unwrapped for Option<T> {
 
 impl<T, E> Unwrapped for Result<T, E> {
     type Inner = T;
+}
+
+#[repr(transparent)]
+#[derive(PartialEq, Eq, Default, Debug)]
+pub struct MyOwned<T: Free>(T);
+
+impl<T: Free> MyOwned<T> {
+    pub unsafe fn new(x: T) -> Self {
+        Self(x)
+    }
+}
+
+impl<T: Free> Drop for MyOwned<T> {
+    fn drop(&mut self) {
+        unsafe { self.0.free() };
+    }
+}
+
+impl<T: Free> Deref for MyOwned<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Free> DerefMut for MyOwned<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+unsafe impl Send for MyOwned<HANDLE> {}
+
+pub(crate) struct UnsafeBorrowed<T>(T);
+
+impl<T> UnsafeBorrowed<T> {
+    pub(crate) unsafe fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+unsafe impl Send for UnsafeBorrowed<HANDLE> {}
+
+impl AsHandle for UnsafeBorrowed<HANDLE> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.0.0) }
+    }
+}
+
+impl AsRawHandle for UnsafeBorrowed<HANDLE> {
+    fn as_raw_handle(&self) -> RawHandle {
+        self.0.0
+    }
 }

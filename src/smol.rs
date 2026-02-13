@@ -1,20 +1,26 @@
 use std::{
     future::{self, Future},
     io,
-    os::windows::io::{AsRawHandle, OwnedHandle},
+    os::windows::io::AsRawHandle,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use async_io::os::windows::Waitable;
-use futures::{Stream, ready};
+use event_listener::EventListener;
+use futures::{FutureExt, Stream, ready};
 use windows::{
     Win32::{Foundation::HANDLE, System::Threading::ResetEvent},
     core::Result,
 };
 use xenstore_rs::{AsyncWatch, AsyncXs, Xs};
 
-use crate::{SuspendContext, WatchContext, XsWindows, suspend::AsyncSuspend, utils::as_io_handle};
+use crate::{
+    XsWindows,
+    multiplex::{XenifaceSuspend, XenifaceWatch},
+    suspend::AsyncSuspend,
+    utils::UnsafeBorrowed,
+};
 
 pub struct XsSmolWindows(XsWindows);
 
@@ -44,8 +50,8 @@ impl AsyncXs for XsSmolWindows {
 }
 
 pub struct XsWindowsWatch {
-    context: WatchContext,
-    waitable: Waitable<OwnedHandle>,
+    waitable: Waitable<UnsafeBorrowed<HANDLE>>,
+    _watch: XenifaceWatch,
     path: Box<str>,
 }
 
@@ -55,7 +61,7 @@ impl Stream for XsWindowsWatch {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         Poll::Ready(ready!(self.waitable.poll_ready(cx)).ok().map(|_| {
             unsafe {
-                ResetEvent(HANDLE(self.waitable.get_ref().as_raw_handle()))
+                ResetEvent(HANDLE(self.waitable.as_raw_handle()))
                     .inspect_err(|e| log::error!("Unable to reset event handle: {e}"))
                     .ok()
             };
@@ -64,55 +70,46 @@ impl Stream for XsWindowsWatch {
     }
 }
 
-impl Drop for XsWindowsWatch {
-    fn drop(&mut self) {
-        if let Err(e) = XsWindows::destroy_watch(&mut self.context) {
-            log::warn!("Unable to destroy watch object {e}")
-        }
-    }
-}
-
 impl AsyncWatch for XsSmolWindows {
     async fn watch(
         &self,
         path: &str,
     ) -> io::Result<impl Stream<Item = Box<str>> + Unpin + 'static> {
-        let (event_handle, context) = self.0.make_watch(path)?;
-        let waitable = Waitable::new(as_io_handle(event_handle))?;
+        let watch = self.0.make_watch(path)?;
+        let handle = watch.get_handle()?;
+        let waitable = Waitable::new(unsafe { UnsafeBorrowed::new(handle) })?;
 
         Ok(XsWindowsWatch {
-            context,
             waitable,
+            _watch: watch,
             path: path.into(),
         })
     }
 }
 
 pub struct XsWindowsSuspend {
-    context: SuspendContext,
-    waitable: Waitable<OwnedHandle>,
+    waitable: Waitable<UnsafeBorrowed<HANDLE>>,
+    _suspend: XenifaceSuspend,
+    arrival: EventListener,
 }
 
 impl Stream for XsWindowsSuspend {
     type Item = ();
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        Poll::Ready(ready!(self.waitable.poll_ready(cx)).ok().map(|_| {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Poll::Ready(Ok(_)) = self.waitable.poll_ready(cx) {
             unsafe {
-                ResetEvent(HANDLE(self.waitable.get_ref().as_raw_handle()))
-                    .inspect_err(|e| log::error!("Unable to reset event handle: {e}"))
-                    .ok()
-            };
-            ()
-        }))
-    }
-}
-
-impl Drop for XsWindowsSuspend {
-    fn drop(&mut self) {
-        if let Err(e) = XsWindows::destroy_suspend(&mut self.context) {
-            log::warn!("Unable to destroy suspend object {e}")
+                let _ = ResetEvent(HANDLE(self.waitable.get_ref().as_raw_handle()))
+                    .inspect_err(|e| log::error!("Unable to reset event handle: {e}"));
+            }
+            return Poll::Ready(Some(()));
         }
+
+        if let Poll::Ready(_) = self.arrival.poll_unpin(cx) {
+            return Poll::Ready(Some(()));
+        }
+
+        Poll::Pending
     }
 }
 
@@ -120,9 +117,15 @@ impl AsyncSuspend for XsSmolWindows {
     async fn register_suspend(
         &self,
     ) -> io::Result<impl futures::Stream<Item = ()> + Unpin + 'static> {
-        let (event_handle, context) = self.0.make_suspend()?;
-        let waitable = Waitable::new(as_io_handle(event_handle))?;
+        let suspend = self.0.make_suspend()?;
+        let handle = suspend.get_handle()?;
+        let waitable = Waitable::new(unsafe { UnsafeBorrowed::new(handle) })?;
+        let arrival = self.0.iface.listen_arrival()?;
 
-        Ok(XsWindowsSuspend { context, waitable })
+        Ok(XsWindowsSuspend {
+            waitable,
+            _suspend: suspend,
+            arrival,
+        })
     }
 }

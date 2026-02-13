@@ -1,17 +1,27 @@
 use std::{
     ffi::c_void,
-    sync::{Arc, Mutex, MutexGuard, Weak, mpsc},
+    sync::{Arc, Mutex, MutexGuard, Weak},
     thread::JoinHandle,
 };
 
+use event_listener::{Event, EventListener};
+use flume::{Receiver, Sender};
+use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use windows::{
-    Win32::{Devices::DeviceAndDriverInstallation::*, Foundation::*, Storage::FileSystem::*},
-    core::{Owned, PCWSTR},
+    Win32::{
+        Devices::DeviceAndDriverInstallation::*, Foundation::*, Storage::FileSystem::*,
+        System::Threading::CreateEventW,
+    },
+    core::PCWSTR,
 };
 
 use crate::{
     cm::CmNotifier,
-    ioctl::{GUID_INTERFACE_XENIFACE, Xeniface},
+    ioctl::{
+        GUID_INTERFACE_XENIFACE, Xeniface, XenifaceStoreAddWatchOut,
+        XenifaceStoreSuspendRegisterOut,
+    },
+    utils::MyOwned,
 };
 
 pub(crate) enum XenifaceRequest {
@@ -22,20 +32,142 @@ pub(crate) enum XenifaceRequest {
     },
 }
 
+// Note: watches are bound to their underlying devices and not the active device in XsWindows.
+// Therefore, MultiplexedWatchNodeState will need to embed a reference to its parent device.
+
+struct WatchNodeState {
+    watch: Option<(Weak<Xeniface>, XenifaceStoreAddWatchOut)>,
+    event: MyOwned<HANDLE>,
+    path: String,
+}
+
+impl Drop for WatchNodeState {
+    fn drop(&mut self) {
+        if let Some((weak, mut out)) = self.watch.take() {
+            if let Some(ptr) = weak.upgrade() {
+                if let Ok(true) = ptr.is_active() {
+                    let _ = ptr
+                        .remove_watch(&mut out)
+                        .inspect_err(|e| log::error!("Failed to remove watch: {e}"));
+                }
+            }
+        }
+    }
+}
+
+struct WatchNode
+where
+    Self: Send,
+{
+    link: LinkedListAtomicLink,
+    state: Mutex<WatchNodeState>,
+}
+
+intrusive_adapter!(WatchAdapter = Arc<WatchNode>: WatchNode { link => LinkedListAtomicLink });
+
+struct SuspendNodeState {
+    suspend: Option<(Weak<Xeniface>, XenifaceStoreSuspendRegisterOut)>,
+    event: MyOwned<HANDLE>,
+}
+
+impl Drop for SuspendNodeState {
+    fn drop(&mut self) {
+        if let Some((weak, mut out)) = self.suspend.take() {
+            if let Some(ptr) = weak.upgrade() {
+                if let Ok(true) = ptr.is_active() {
+                    let _ = ptr
+                        .suspend_deregister(&mut out)
+                        .inspect_err(|e| log::error!("Failed to remove suspend: {e}"));
+                }
+            }
+        }
+    }
+}
+
+struct SuspendNode
+where
+    Self: Send,
+{
+    link: LinkedListAtomicLink,
+    state: Mutex<SuspendNodeState>,
+}
+
+intrusive_adapter!(SuspendAdapter = Arc<SuspendNode>: SuspendNode { link => LinkedListAtomicLink });
+
 struct MultiplexState {
     worker: Option<JoinHandle<windows::core::Result<()>>>,
     active: Option<Arc<Xeniface>>,
-    sender: Option<mpsc::Sender<XenifaceRequest>>,
+    sender: Option<Sender<XenifaceRequest>>,
+    arrival: Event,
+    watches: LinkedList<WatchAdapter>,
+    suspends: LinkedList<SuspendAdapter>,
 }
 
-pub(crate) struct MultiplexedXeniface {
+pub(crate) struct MultiplexedXeniface
+where
+    Self: Send + Sync,
+{
     me: Weak<MultiplexedXeniface>,
     state: Mutex<MultiplexState>,
 }
 
-pub struct XenifaceMultiplexWorker(Weak<MultiplexedXeniface>);
+pub struct XenifaceWatch(Arc<MultiplexedXeniface>, Arc<WatchNode>);
 
-impl Drop for XenifaceMultiplexWorker {
+impl XenifaceWatch {
+    pub fn get_handle(&self) -> windows::core::Result<HANDLE> {
+        let node_lock = self
+            .1
+            .state
+            .lock()
+            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+        Ok(*node_lock.event)
+    }
+}
+
+impl Drop for XenifaceWatch {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Ok(mut node_lock) = self.1.state.lock() {
+                drop(node_lock.watch.take());
+            }
+            unsafe {
+                drop(state.watches.cursor_mut_from_ptr(self.1.as_ref()).remove());
+            }
+        }
+    }
+}
+
+pub struct XenifaceSuspend(Arc<MultiplexedXeniface>, Arc<SuspendNode>);
+
+impl XenifaceSuspend {
+    pub fn get_handle(&self) -> windows::core::Result<HANDLE> {
+        let node_lock = self
+            .1
+            .state
+            .lock()
+            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+        Ok(*node_lock.event)
+    }
+}
+
+impl Drop for XenifaceSuspend {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Ok(mut node_lock) = self.1.state.lock() {
+                drop(node_lock.suspend.take());
+            }
+            unsafe {
+                drop(state.suspends.cursor_mut_from_ptr(self.1.as_ref()).remove());
+            }
+        }
+    }
+}
+
+pub struct XenifaceWorker(Weak<MultiplexedXeniface>)
+where
+    Self: Send;
+
+impl Drop for XenifaceWorker {
     fn drop(&mut self) {
         if let Some(x) = self.0.upgrade() {
             x.stop();
@@ -51,20 +183,32 @@ impl MultiplexedXeniface {
                 worker: None,
                 active: None,
                 sender: None,
+                arrival: Event::new(),
+                watches: Default::default(),
+                suspends: Default::default(),
             }),
         });
         result
     }
 
-    pub fn start(&self) -> XenifaceMultiplexWorker {
+    pub fn start(&self) -> XenifaceWorker {
         let mut state = self.state.lock().unwrap();
         assert!(state.worker.is_none());
         assert!(state.sender.is_none());
-        let (sender, receiver) = mpsc::channel();
+
+        // for worker Cm notify messages
+        let (sender, receiver) = flume::unbounded();
+        // initial probe
+        sender
+            .send(XenifaceRequest::Worker(
+                CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL,
+            ))
+            .unwrap();
         let ptr = self.me.upgrade().clone().unwrap();
+
         state.sender = Some(sender);
         state.worker = Some(std::thread::spawn(move || Self::worker(ptr, receiver)));
-        XenifaceMultiplexWorker(self.me.clone())
+        XenifaceWorker(self.me.clone())
     }
 
     pub(crate) fn stop(&self) {
@@ -80,12 +224,67 @@ impl MultiplexedXeniface {
         }
     }
 
-    pub fn active(&self) -> windows::core::Result<Option<Arc<Xeniface>>> {
-        let state = self
-            .state
+    fn lock(&self) -> windows::core::Result<MutexGuard<'_, MultiplexState>> {
+        self.state
             .lock()
-            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))
+    }
+
+    pub fn active(&self) -> windows::core::Result<Option<Arc<Xeniface>>> {
+        let state = self.lock()?;
         Ok(state.active.clone())
+    }
+
+    pub fn listen_arrival(&self) -> windows::core::Result<EventListener> {
+        let state = self.lock()?;
+        Ok(state.arrival.listen())
+    }
+
+    pub fn add_watch(&self, path: &str) -> windows::core::Result<XenifaceWatch> {
+        let mut state = self.lock()?;
+
+        let event = unsafe { MyOwned::new(CreateEventW(None, true, false, None)?) };
+        let handle = *event;
+        let node = Arc::new(WatchNode {
+            link: Default::default(),
+            state: Mutex::new(WatchNodeState {
+                watch: None,
+                event,
+                path: String::from(path),
+            }),
+        });
+        if let Some(active) = state.active.as_ref() {
+            let mut node_lock = node.state.lock().unwrap();
+            let watch_out = unsafe { active.add_watch(path, handle)? };
+            node_lock.watch.replace((Arc::downgrade(active), watch_out));
+        }
+
+        state.watches.push_back(node.clone());
+        Ok(XenifaceWatch(self.me.upgrade().unwrap(), node))
+    }
+
+    pub fn register_suspend(&self) -> windows::core::Result<XenifaceSuspend> {
+        let mut state = self.lock()?;
+
+        let event = unsafe { MyOwned::new(CreateEventW(None, true, false, None)?) };
+        let handle = *event;
+        let node = Arc::new(SuspendNode {
+            link: Default::default(),
+            state: Mutex::new(SuspendNodeState {
+                suspend: None,
+                event,
+            }),
+        });
+        if let Some(active) = state.active.as_ref() {
+            let mut node_lock = node.state.lock().unwrap();
+            let suspend_out = unsafe { active.suspend_register(handle)? };
+            node_lock
+                .suspend
+                .replace((Arc::downgrade(active), suspend_out));
+        }
+
+        state.suspends.push_back(node.clone());
+        Ok(XenifaceSuspend(self.me.upgrade().unwrap(), node))
     }
 
     unsafe extern "system" fn worker_cm_callback(
@@ -135,7 +334,8 @@ impl MultiplexedXeniface {
             let child = unsafe {
                 let arc = Arc::from_raw(context as *const Xeniface);
                 let child = arc.clone();
-                let _ = Arc::into_raw(arc);
+                let new = Arc::into_raw(arc);
+                assert!(new == context as *const Xeniface);
                 child
             };
 
@@ -169,7 +369,7 @@ impl MultiplexedXeniface {
 
     fn open_raw(&self, wpath: PCWSTR) -> windows::core::Result<Arc<Xeniface>> {
         let handle = unsafe {
-            Owned::new(CreateFileW(
+            MyOwned::new(CreateFileW(
                 wpath,
                 (GENERIC_READ | GENERIC_WRITE).0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -180,8 +380,7 @@ impl MultiplexedXeniface {
             )?)
         };
         let result = Arc::new_cyclic(|child: &Weak<Xeniface>| {
-            let result = Xeniface::new(child, self.me.clone()).unwrap();
-            result
+            Xeniface::new(child, self.me.clone()).unwrap()
         });
         result.register(handle, Self::listener_callback)?;
         Ok(result)
@@ -229,15 +428,37 @@ impl MultiplexedXeniface {
         }
 
         let next = self.open(&paths)?;
-        state.active = Some(next);
+        state.active = Some(next.clone());
+
+        state.watches.iter().for_each(|w| {
+            if let Ok(mut node_lock) = w.state.lock() {
+                if let Ok(watch_out) = unsafe { next.add_watch(&node_lock.path, *node_lock.event) }
+                {
+                    node_lock.watch.replace((Arc::downgrade(&next), watch_out));
+                } else {
+                    // stale?
+                    node_lock.watch.take();
+                }
+            }
+        });
+        state.suspends.iter().for_each(|s| {
+            if let Ok(mut node_lock) = s.state.lock() {
+                if let Ok(suspend_out) = unsafe { next.suspend_register(*node_lock.event) } {
+                    node_lock
+                        .suspend
+                        .replace((Arc::downgrade(&next), suspend_out));
+                } else {
+                    // stale?
+                    node_lock.suspend.take();
+                }
+            }
+        });
+        state.arrival.notify(usize::MAX);
 
         Ok(())
     }
 
-    fn worker(
-        self: Arc<Self>,
-        receiver: mpsc::Receiver<XenifaceRequest>,
-    ) -> windows::core::Result<()> {
+    fn worker(self: Arc<Self>, receiver: Receiver<XenifaceRequest>) -> windows::core::Result<()> {
         let mut tombstones = Vec::<Arc<Xeniface>>::new();
 
         let filter = CM_NOTIFY_FILTER {
@@ -251,18 +472,13 @@ impl MultiplexedXeniface {
             ..Default::default()
         };
 
-        let _cr = CmNotifier::<Self>::new(
-            &filter,
-            self.me.upgrade().unwrap().clone(),
-            Self::worker_cm_callback,
-        )?;
-
-        {
-            let mut state = self.state.lock().unwrap();
-            if let Err(e) = self.refresh(&mut state, &mut tombstones) {
-                log::info!("Refresh failed: {e}")
-            }
-        }
+        let _cr = unsafe {
+            CmNotifier::<Self>::new(
+                &filter,
+                self.me.upgrade().unwrap().clone(),
+                Self::worker_cm_callback,
+            )?
+        };
 
         while let Ok(request) = receiver.recv() {
             {
@@ -278,11 +494,7 @@ impl MultiplexedXeniface {
                             CM_NOTIFY_ACTION_DEVICEREMOVEPENDING | CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE,
                         target,
                     } => {
-                        if let Some(active) = state.active.as_ref() {
-                            if Arc::ptr_eq(&target, active) {
-                                state.active = None
-                            }
-                        }
+                        state.active.take_if(|active| Arc::ptr_eq(&target, active));
                         tombstones.push(target);
                     }
                     _ => {}

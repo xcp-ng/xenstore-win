@@ -12,14 +12,14 @@ use windows::{
             Ioctl::{FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED},
         },
     },
-    core::{GUID, Owned},
+    core::GUID,
 };
 
 use crate::{
     cm::CmNotifier,
     device::DeviceInfoList,
     multiplex::MultiplexedXeniface,
-    utils::{Unwrapped, make_payload, parse_nul_list, parse_nul_string},
+    utils::{MyOwned, Unwrapped, make_payload, parse_nul_list, parse_nul_string},
 };
 
 pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
@@ -89,10 +89,8 @@ pub(crate) struct Xeniface {
     me: Weak<Xeniface>,
     pub(crate) parent: Weak<MultiplexedXeniface>,
     // The handle must be closed before the notifier
-    state: Mutex<Option<(Owned<HANDLE>, CmNotifier<Xeniface>)>>,
+    state: Mutex<Option<(MyOwned<HANDLE>, CmNotifier<Xeniface>)>>,
 }
-unsafe impl Send for Xeniface {}
-unsafe impl Sync for Xeniface {}
 
 impl Xeniface {
     pub(crate) fn enumerate() -> windows::core::Result<DeviceInfoList> {
@@ -113,7 +111,7 @@ impl Xeniface {
 
     pub(crate) fn register(
         &self,
-        handle: Owned<HANDLE>,
+        handle: MyOwned<HANDLE>,
         callback: <PCM_NOTIFY_CALLBACK as Unwrapped>::Inner,
     ) -> windows::core::Result<()> {
         let context = self.me.upgrade().unwrap();
@@ -130,14 +128,15 @@ impl Xeniface {
             ..Default::default()
         };
 
-        let cm = CmNotifier::<Xeniface>::new(&filter, context, callback)?;
+        let cm = unsafe { CmNotifier::<Xeniface>::new(&filter, context, callback)? };
         state.replace((handle, cm));
         Ok(())
     }
 
     pub fn lock(
         &self,
-    ) -> windows::core::Result<MutexGuard<'_, Option<(Owned<HANDLE>, CmNotifier<Xeniface>)>>> {
+    ) -> windows::core::Result<MutexGuard<'_, Option<(MyOwned<HANDLE>, CmNotifier<Xeniface>)>>>
+    {
         let state = self
             .state
             .lock()

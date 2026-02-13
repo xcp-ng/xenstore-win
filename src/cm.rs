@@ -2,10 +2,10 @@ use std::{ffi::c_void, ops::DerefMut, sync::Arc};
 
 use windows::{
     Win32::{Devices::DeviceAndDriverInstallation::*, Foundation::ERROR_GEN_FAILURE},
-    core::{HRESULT, Owned},
+    core::HRESULT,
 };
 
-use crate::utils::Unwrapped;
+use crate::utils::{MyOwned, Unwrapped};
 
 struct DerefedArcPtr<T>(*const T);
 
@@ -21,20 +21,19 @@ impl<T> Drop for DerefedArcPtr<T> {
     }
 }
 
-pub(crate) struct CmNotifier<T: Send + Sync> {
-    _listener: Owned<HCMNOTIFICATION>,
+pub(crate) struct CmNotifier<T> {
+    _listener: MyOwned<HCMNOTIFICATION>,
     _ptr: DerefedArcPtr<T>,
 }
-unsafe impl<T: Send + Sync> Send for CmNotifier<T> {}
-unsafe impl<T: Send + Sync> Sync for CmNotifier<T> {}
+unsafe impl<T> Send for CmNotifier<T> {}
 
-impl<T: Send + Sync> CmNotifier<T> {
-    pub fn new(
+impl<T> CmNotifier<T> {
+    pub unsafe fn new(
         filter: &CM_NOTIFY_FILTER,
         context: Arc<T>,
         callback: <PCM_NOTIFY_CALLBACK as Unwrapped>::Inner,
     ) -> windows::core::Result<Self> {
-        let mut listener = Owned::<HCMNOTIFICATION>::default();
+        let mut listener = MyOwned::<HCMNOTIFICATION>::default();
         let ptr = DerefedArcPtr::new(context);
         unsafe {
             match CM_Register_Notification(

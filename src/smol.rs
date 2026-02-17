@@ -89,8 +89,8 @@ impl AsyncWatch for XsSmolWindows {
 
 pub struct XsWindowsSuspend {
     waitable: Waitable<UnsafeBorrowed<HANDLE>>,
-    _suspend: XenifaceSuspend,
-    arrival: EventListener,
+    suspend: XenifaceSuspend,
+    arrival: Option<EventListener>,
 }
 
 impl Stream for XsWindowsSuspend {
@@ -105,8 +105,14 @@ impl Stream for XsWindowsSuspend {
             return Poll::Ready(Some(()));
         }
 
-        if let Poll::Ready(_) = self.arrival.poll_unpin(cx) {
-            return Poll::Ready(Some(()));
+        if self.arrival.is_none() {
+            self.arrival = self.suspend.listen_arrival().ok();
+        }
+        if let Some(arrival) = self.arrival.as_mut() {
+            if let Poll::Ready(_) = arrival.poll_unpin(cx) {
+                self.arrival = None;
+                return Poll::Ready(Some(()));
+            }
         }
 
         Poll::Pending
@@ -120,12 +126,11 @@ impl AsyncSuspend for XsSmolWindows {
         let suspend = self.0.make_suspend()?;
         let handle = suspend.get_handle()?;
         let waitable = Waitable::new(unsafe { UnsafeBorrowed::new(handle) })?;
-        let arrival = self.0.iface.listen_arrival()?;
 
         Ok(XsWindowsSuspend {
             waitable,
-            _suspend: suspend,
-            arrival,
+            suspend,
+            arrival: None,
         })
     }
 }

@@ -148,6 +148,10 @@ impl XenifaceSuspend {
             .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
         Ok(*node_lock.event)
     }
+
+    pub fn listen_arrival(&self) -> windows::core::Result<EventListener> {
+        self.0.listen_arrival()
+    }
 }
 
 impl Drop for XenifaceSuspend {

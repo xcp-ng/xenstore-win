@@ -347,8 +347,9 @@ impl MultiplexedXeniface {
                 || action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED
             {
                 log::debug!("CM_NOTIFY_ACTION_DEVICEQUERYREMOVE/FAILED");
-                let mut iface = child.lock().map_err(|_| ERROR_INVALID_HANDLE.0)?;
-                iface.take();
+                let _ = child
+                    .clear()
+                    .inspect_err(|e| log::error!("Cannot clear interface: {e}"));
             }
 
             let parent = child.parent.upgrade().ok_or(ERROR_NOT_FOUND.0)?;

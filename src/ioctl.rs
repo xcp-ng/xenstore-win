@@ -133,7 +133,7 @@ impl Xeniface {
         Ok(())
     }
 
-    pub fn lock(
+    fn lock(
         &self,
     ) -> windows::core::Result<MutexGuard<'_, Option<(MyOwned<HANDLE>, CmNotifier<Xeniface>)>>>
     {
@@ -147,6 +147,12 @@ impl Xeniface {
     pub fn is_active(&self) -> windows::core::Result<bool> {
         let state = self.lock()?;
         Ok(state.is_some())
+    }
+
+    pub fn clear(&self) -> windows::core::Result<()> {
+        let mut state = self.lock()?;
+        state.take();
+        Ok(())
     }
 
     unsafe fn raw_ioctl(

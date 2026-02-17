@@ -11,7 +11,10 @@ mod utils;
 pub mod smol;
 pub mod suspend;
 
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{Arc, LazyLock},
+};
 
 use windows::{Win32::Foundation::ERROR_FILE_NOT_FOUND, core::Result};
 use xenstore_rs::Xs;
@@ -28,11 +31,20 @@ pub struct XsWindows {
     iface: Arc<MultiplexedXeniface>,
 }
 
+static IFACE: LazyLock<XsWindows> = LazyLock::new(|| XsWindows::new_instance().unwrap());
+
 impl XsWindows {
-    pub fn new() -> Result<Self> {
+    fn new_instance() -> Result<Self> {
         let iface = MultiplexedXeniface::new();
         let worker = Arc::new(iface.start());
-        Ok(Self { worker, iface })
+        Ok(XsWindows { worker, iface })
+    }
+
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            worker: IFACE.worker.clone(),
+            iface: IFACE.iface.clone(),
+        })
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {

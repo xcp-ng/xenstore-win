@@ -17,7 +17,7 @@ use windows::{
 
 use crate::{
     cm::CmNotifier,
-    ioctl::{
+    device::{
         GUID_INTERFACE_XENIFACE, Xeniface, XenifaceStoreAddWatchOut,
         XenifaceStoreSuspendRegisterOut,
     },

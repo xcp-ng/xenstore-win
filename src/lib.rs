@@ -3,7 +3,7 @@
 //!
 mod cm;
 mod device;
-mod ioctl;
+mod devicelist;
 mod multiplex;
 mod utils;
 
@@ -20,7 +20,7 @@ use windows::{Win32::Foundation::ERROR_FILE_NOT_FOUND, core::Result};
 use xenstore_rs::Xs;
 
 use crate::{
-    ioctl::Xeniface,
+    device::Xeniface,
     multiplex::{MultiplexedXeniface, XenifaceSuspend, XenifaceWatch, XenifaceWorker},
 };
 
@@ -31,7 +31,7 @@ pub struct XsWindows {
     iface: Arc<MultiplexedXeniface>,
 }
 
-static IFACE: LazyLock<XsWindows> = LazyLock::new(|| XsWindows::new_instance().unwrap());
+static XENIFACE: LazyLock<XsWindows> = LazyLock::new(|| XsWindows::new_instance().unwrap());
 
 impl XsWindows {
     fn new_instance() -> Result<Self> {
@@ -42,8 +42,8 @@ impl XsWindows {
 
     pub fn new() -> Result<Self> {
         Ok(Self {
-            worker: IFACE.worker.clone(),
-            iface: IFACE.iface.clone(),
+            worker: XENIFACE.worker.clone(),
+            iface: XENIFACE.iface.clone(),
         })
     }
 

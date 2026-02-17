@@ -1,152 +1,345 @@
-//! Xeniface device discovery utilities.
-//!
-use log::{error, warn};
-use windows::{
-    Win32::Devices::DeviceAndDriverInstallation::{
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
-        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList,
-        SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-    },
-    core::{GUID, Result},
+use std::{
+    ffi::{CString, c_char, c_ulong, c_void},
+    sync::{Mutex, MutexGuard, Weak},
 };
 
-const MAX_INTERFACE_DETAIL_PATH_LEN: usize = 4094;
+use windows::{
+    Win32::{
+        Devices::DeviceAndDriverInstallation::*,
+        Foundation::{ERROR_INVALID_HANDLE, ERROR_NOT_ENOUGH_MEMORY, HANDLE},
+        System::{
+            IO::DeviceIoControl,
+            Ioctl::{FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED},
+        },
+    },
+    core::GUID,
+};
 
-// Extended SP_DEVICE_INTERFACE_DATA_DETAIL_W (fixed flex array at 4094)
-// Maximum path is 4094 characters.
-// Hopefully, we would have "never" a that large path.
+use crate::{
+    cm::CmNotifier,
+    devicelist::DeviceInfoList,
+    multiplex::MultiplexedXeniface,
+    utils::{MyOwned, Unwrapped, make_payload, parse_nul_list, parse_nul_string},
+};
+
+pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
+    0xb2cfb085,
+    0xaa5e,
+    0x47e1,
+    [0x8b, 0xf7, 0x97, 0x93, 0xf3, 0x15, 0x45, 0x65],
+);
+
+// Well, there is no CTL_CODE in the windows crate so we need to add it ourselves.
+// Taken from https://docs.rs/winapi/latest/src/winapi/um/winioctl.rs.html#146-153
+const fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
+    (device_type << 16) | (access << 14) | (function << 2) | method
+}
+
+const IOCTL_XENIFACE_STORE_READ: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+const IOCTL_XENIFACE_STORE_WRITE: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+const IOCTL_XENIFACE_STORE_DIRECTORY: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+const IOCTL_XENIFACE_STORE_REMOVE: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
 #[repr(C)]
-struct ExtendedDataDetail {
-    cb_size: u32,
-    path: [u16; MAX_INTERFACE_DETAIL_PATH_LEN],
+struct XenifaceStoreAddWatchIn {
+    path: *const c_char,
+    path_length: c_ulong,
+    event: HANDLE,
 }
 
-impl Default for ExtendedDataDetail {
-    fn default() -> Self {
-        Self {
-            cb_size: Default::default(),
-            path: [0; MAX_INTERFACE_DETAIL_PATH_LEN],
-        }
+#[repr(C)]
+pub(crate) struct XenifaceStoreAddWatchOut {
+    context: *const c_void,
+}
+unsafe impl Send for XenifaceStoreAddWatchOut {}
+unsafe impl Sync for XenifaceStoreAddWatchOut {}
+
+const IOCTL_XENIFACE_STORE_ADD_WATCH: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+const IOCTL_XENIFACE_STORE_REMOVE_WATCH: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+#[repr(C)]
+struct XenifaceStoreSuspendRegisterIn {
+    event: HANDLE,
+}
+
+#[repr(C)]
+pub(crate) struct XenifaceStoreSuspendRegisterOut {
+    context: *const c_void,
+}
+unsafe impl Send for XenifaceStoreSuspendRegisterOut {}
+unsafe impl Sync for XenifaceStoreSuspendRegisterOut {}
+
+const IOCTL_XENIFACE_SUSPEND_REGISTER: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x831, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+const IOCTL_XENIFACE_SUSPEND_DEREGISTER: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, 0x832, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
+pub(crate) struct Xeniface {
+    me: Weak<Xeniface>,
+    pub(crate) parent: Weak<MultiplexedXeniface>,
+    // The handle must be closed before the notifier
+    state: Mutex<Option<(MyOwned<HANDLE>, CmNotifier<Xeniface>)>>,
+}
+
+impl Xeniface {
+    pub(crate) fn enumerate() -> windows::core::Result<DeviceInfoList> {
+        // Try all devices with XENIFACE class.
+        DeviceInfoList::new(GUID_INTERFACE_XENIFACE)
     }
-}
 
-impl ExtendedDataDetail {
-    // ExtendedDataDetail is ABI-compatible with SP_DEVICE_INTERFACE_DETAIL_DATA_W.
-    // We just need to ensure that required length < size_of::<ExtendedDataDetail>().
-    fn as_data_detail_ptr(&mut self) -> *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W {
-        &mut *self as *mut _ as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W
-    }
-}
-
-/// Set of device sharing the GUID.
-pub(crate) struct DeviceInfoList {
-    info: HDEVINFO,
-    class_guid: GUID,
-}
-
-impl DeviceInfoList {
-    pub fn new(class_guid: GUID) -> Result<Self> {
+    pub(crate) fn new(
+        child: &Weak<Self>,
+        parent: Weak<MultiplexedXeniface>,
+    ) -> windows::core::Result<Self> {
         Ok(Self {
-            info: unsafe {
-                SetupDiGetClassDevsW(
-                    Some(&class_guid),
-                    None,
-                    None,
-                    DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
-                )
-            }?,
-            class_guid,
+            me: child.clone(),
+            parent,
+            state: Mutex::new(None),
         })
     }
 
-    pub fn iter(&'_ self) -> DeviceInfoIterator<'_> {
-        DeviceInfoIterator {
-            list: self,
-            index: 0,
-            buffer: Box::default(),
-        }
+    pub(crate) fn register(
+        &self,
+        handle: MyOwned<HANDLE>,
+        callback: <PCM_NOTIFY_CALLBACK as Unwrapped>::Inner,
+    ) -> windows::core::Result<()> {
+        let context = self.me.upgrade().unwrap();
+
+        let mut state = self.lock()?;
+        assert!(state.is_none());
+
+        let filter = CM_NOTIFY_FILTER {
+            cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
+            FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
+            u: CM_NOTIFY_FILTER_0 {
+                DeviceHandle: CM_NOTIFY_FILTER_0_1 { hTarget: *handle },
+            },
+            ..Default::default()
+        };
+
+        let cm = unsafe { CmNotifier::<Xeniface>::new(&filter, context, callback)? };
+        state.replace((handle, cm));
+        Ok(())
     }
-}
 
-impl Drop for DeviceInfoList {
-    fn drop(&mut self) {
-        if let Err(e) = unsafe { SetupDiDestroyDeviceInfoList(self.info) } {
-            warn!("Unable to destroy device info list {e}");
-        }
+    fn lock(
+        &self,
+    ) -> windows::core::Result<MutexGuard<'_, Option<(MyOwned<HANDLE>, CmNotifier<Xeniface>)>>>
+    {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+        Ok(state)
     }
-}
 
-pub(crate) struct DeviceInfoIterator<'a> {
-    list: &'a DeviceInfoList,
-    index: u32,
-    buffer: Box<ExtendedDataDetail>,
-}
+    pub fn is_active(&self) -> windows::core::Result<bool> {
+        let state = self.lock()?;
+        Ok(state.is_some())
+    }
 
-/// Iterator of device info paths in WTF16 encoding.
-impl Iterator for DeviceInfoIterator<'_> {
-    type Item = Box<[u16]>;
+    pub fn close(&self) -> windows::core::Result<()> {
+        let mut state = self.lock()?;
+        if let Some(state) = state.as_mut() {
+            drop(std::mem::replace(&mut state.0, Default::default()));
+        }
+        Ok(())
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
+    unsafe fn raw_ioctl(
+        &self,
+        control_code: u32,
+        in_buffer: &[u8],
+        out_buffer: Option<&mut [u8]>,
+    ) -> windows::core::Result<u32> {
+        let mut len = 0;
+        let out_buffer_len = out_buffer.as_deref().map_or(0, |s| s.len()) as u32;
+
+        let lock = self.lock()?;
+        let handle = lock
+            .as_ref()
+            .map(|l| &l.0)
+            .ok_or(windows::core::Error::from(ERROR_INVALID_HANDLE))?;
+
         unsafe {
-            let mut data = SP_DEVICE_INTERFACE_DATA {
-                cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
-                ..Default::default()
-            };
-
-            // Iterate and take the next one that "works".
-            while SetupDiEnumDeviceInterfaces(
-                self.list.info,
+            DeviceIoControl(
+                **handle,
+                control_code,
+                Some(in_buffer.as_ptr().cast()),
+                in_buffer.len() as u32,
+                out_buffer.map(|r| r.as_mut_ptr().cast()),
+                out_buffer_len,
+                Some(&mut len),
                 None,
-                &self.list.class_guid,
-                self.index,
-                &mut data,
-            )
-            .is_ok()
-            {
-                self.index += 1;
-                let mut length = 0;
-
-                // Get the length of the interface detail.
-                SetupDiGetDeviceInterfaceDetailW(
-                    self.list.info,
-                    &mut data,
-                    None,
-                    0,
-                    Some(&mut length),
-                    None,
-                ) // it will fail but we only want to know length
-                .ok();
-
-                if (length as usize) > size_of::<ExtendedDataDetail>() {
-                    warn!(
-                        "interface detail too large ! ({} > {})",
-                        length,
-                        size_of::<ExtendedDataDetail>()
-                    );
-                    continue;
-                }
-
-                self.buffer.cb_size = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
-
-                if let Err(e) = SetupDiGetDeviceInterfaceDetailW(
-                    self.list.info,
-                    &mut data,
-                    Some(self.buffer.as_data_detail_ptr()),
-                    length,
-                    None,
-                    None,
-                ) {
-                    error!(
-                        "SetupDiGetDeviceInterfaceDetailW(index = {}) failure: {e:?}",
-                        self.index - 1
-                    );
-                    continue;
-                };
-
-                return Some(self.buffer.path.into());
-            }
-
-            None
+            )?;
         }
+
+        Ok(len)
+    }
+
+    unsafe fn ioctl<In, Out>(
+        &self,
+        control_code: u32,
+        in_val: &In,
+        out_val: Option<&mut Out>,
+    ) -> windows::core::Result<u32> {
+        unsafe {
+            let in_slice =
+                core::slice::from_raw_parts(in_val as *const In as *const u8, size_of_val(in_val));
+            let out_slice = out_val
+                .map(|r| core::slice::from_raw_parts_mut(r as *mut Out as *mut u8, size_of_val(r)));
+            self.raw_ioctl(control_code, in_slice, out_slice)
+        }
+    }
+
+    pub fn store_directory(&self, path: &str) -> windows::core::Result<Vec<Box<str>>> {
+        log::debug!("store_directory {}", path);
+        let in_buffer = make_payload(&[path]);
+        let mut out_buffer = vec![0u8; 4096];
+
+        let len = unsafe {
+            self.raw_ioctl(
+                IOCTL_XENIFACE_STORE_DIRECTORY,
+                &in_buffer,
+                Some(&mut out_buffer),
+            )?
+        };
+        out_buffer.truncate(len as usize);
+
+        Ok(parse_nul_list(&out_buffer)
+            .iter()
+            .map(|s| String::from_utf8_lossy(*s).into_owned().into_boxed_str())
+            .collect())
+    }
+
+    pub fn store_read(&self, path: &str) -> windows::core::Result<Box<str>> {
+        log::debug!("store_read {}", path);
+        let in_buffer = make_payload(&[path]);
+        let mut out_buffer = vec![0u8; 4096];
+
+        let len = unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_READ, &in_buffer, Some(&mut out_buffer))?
+        };
+        out_buffer.truncate(len as usize);
+
+        Ok(
+            String::from_utf8_lossy(parse_nul_string(&out_buffer).unwrap_or_default())
+                .into_owned()
+                .into_boxed_str(),
+        )
+    }
+
+    pub fn store_write(&self, path: &str, data: &str) -> windows::core::Result<()> {
+        log::debug!("store_write {}", path);
+        let in_buffer = make_payload(&[path, data]);
+
+        unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_WRITE, &in_buffer, None)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn store_remove(&self, path: &str) -> windows::core::Result<()> {
+        log::debug!("store_remove {}", path);
+        let in_buffer = make_payload(&[path]);
+
+        unsafe {
+            self.raw_ioctl(IOCTL_XENIFACE_STORE_REMOVE, &in_buffer, None)?;
+        }
+
+        Ok(())
+    }
+
+    pub unsafe fn add_watch<'a>(
+        &'a self,
+        path: &str,
+        event: HANDLE,
+    ) -> windows::core::Result<XenifaceStoreAddWatchOut> {
+        log::debug!("add_watch {}", path);
+        let c_path = CString::new(path)
+            .map_err(|_| windows::core::Error::from_hresult(ERROR_NOT_ENOUGH_MEMORY.into()))?;
+        let path_bytes = c_path.to_bytes_with_nul();
+
+        let watch_in = XenifaceStoreAddWatchIn {
+            path: path_bytes.as_ptr() as *const c_char,
+            path_length: path_bytes.len() as u32,
+            event: event,
+        };
+        let mut context = XenifaceStoreAddWatchOut {
+            context: std::ptr::null_mut(),
+        };
+
+        unsafe {
+            self.ioctl(
+                IOCTL_XENIFACE_STORE_ADD_WATCH,
+                &watch_in,
+                Some(&mut context),
+            )?;
+        }
+
+        Ok(context)
+    }
+
+    pub fn remove_watch(
+        &self,
+        context: &mut XenifaceStoreAddWatchOut,
+    ) -> windows::core::Result<()> {
+        log::debug!("remove_watch");
+        unsafe {
+            self.ioctl::<XenifaceStoreAddWatchOut, c_void>(
+                IOCTL_XENIFACE_STORE_REMOVE_WATCH,
+                context,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub unsafe fn suspend_register<'a>(
+        &'a self,
+        event: HANDLE,
+    ) -> windows::core::Result<XenifaceStoreSuspendRegisterOut> {
+        log::debug!("suspend_register");
+        let suspend_in = XenifaceStoreSuspendRegisterIn { event: event };
+        let mut context = XenifaceStoreSuspendRegisterOut {
+            context: std::ptr::null_mut(),
+        };
+
+        unsafe {
+            self.ioctl(
+                IOCTL_XENIFACE_SUSPEND_REGISTER,
+                &suspend_in,
+                Some(&mut context.context),
+            )?;
+        }
+
+        Ok(context)
+    }
+
+    pub fn suspend_deregister(
+        &self,
+        context: &mut XenifaceStoreSuspendRegisterOut,
+    ) -> windows::core::Result<()> {
+        log::debug!("suspend_deregister");
+        unsafe {
+            self.ioctl::<XenifaceStoreSuspendRegisterOut, c_void>(
+                IOCTL_XENIFACE_SUSPEND_DEREGISTER,
+                context,
+                None,
+            )?;
+        }
+        Ok(())
     }
 }

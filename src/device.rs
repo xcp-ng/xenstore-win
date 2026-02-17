@@ -275,7 +275,7 @@ impl Xeniface {
         let watch_in = XenifaceStoreAddWatchIn {
             path: path_bytes.as_ptr() as *const c_char,
             path_length: path_bytes.len() as u32,
-            event: event,
+            event,
         };
         let mut context = XenifaceStoreAddWatchOut {
             context: std::ptr::null_mut(),

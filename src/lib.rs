@@ -31,7 +31,8 @@ pub struct XsWindows {
     iface: Arc<MultiplexedXeniface>,
 }
 
-static XENIFACE: LazyLock<XsWindows> = LazyLock::new(|| XsWindows::new_instance().unwrap());
+static XENIFACE: LazyLock<XsWindows> =
+    LazyLock::new(|| XsWindows::new_instance().expect("Failed to start Xeniface multiplexer"));
 
 impl XsWindows {
     fn new_instance() -> Result<Self> {
@@ -54,7 +55,7 @@ impl XsWindows {
         })
     }
 
-    fn with_device<T>(&self, f: impl FnOnce(&Arc<Xeniface>) -> io::Result<T>) -> io::Result<T> {
+    fn with_device<T>(&self, f: impl FnOnce(&Xeniface) -> io::Result<T>) -> io::Result<T> {
         let ptr = self
             .iface
             .active()?

@@ -348,8 +348,8 @@ impl MultiplexedXeniface {
             {
                 log::debug!("CM_NOTIFY_ACTION_DEVICEQUERYREMOVE/FAILED");
                 let _ = child
-                    .clear()
-                    .inspect_err(|e| log::error!("Cannot clear interface: {e}"));
+                    .close()
+                    .inspect_err(|e| log::error!("Cannot close interface: {e}"));
             }
 
             let parent = child.parent.upgrade().ok_or(ERROR_NOT_FOUND.0)?;

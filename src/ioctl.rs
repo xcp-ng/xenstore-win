@@ -149,9 +149,11 @@ impl Xeniface {
         Ok(state.is_some())
     }
 
-    pub fn clear(&self) -> windows::core::Result<()> {
+    pub fn close(&self) -> windows::core::Result<()> {
         let mut state = self.lock()?;
-        state.take();
+        if let Some(state) = state.as_mut() {
+            drop(std::mem::replace(&mut state.0, Default::default()));
+        }
         Ok(())
     }
 

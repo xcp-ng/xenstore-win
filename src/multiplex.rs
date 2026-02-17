@@ -425,11 +425,10 @@ impl MultiplexedXeniface {
             if active.is_active()? {
                 log::debug!("Device valid, skipping refresh");
                 return Ok(());
+            } else {
+                log::debug!("Tombstoning existing inactive device");
+                tombstones.push(state.active.take().unwrap());
             }
-        }
-
-        if let Some(active) = state.active.take() {
-            tombstones.push(active);
         }
 
         let next = self.open(&paths)?;

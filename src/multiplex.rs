@@ -414,21 +414,27 @@ impl MultiplexedXeniface {
         state: &mut MutexGuard<'_, MultiplexState>,
         tombstones: &mut Vec<Arc<Xeniface>>,
     ) -> windows::core::Result<()> {
-        let paths: Vec<Box<[u16]>> = Xeniface::enumerate()?.iter().collect();
-
-        if paths.is_empty() {
-            log::debug!("Interface list empty");
-            return Err(ERROR_NOT_FOUND.into());
-        }
-
         if let Some(active) = state.active.as_ref() {
-            if active.is_active()? {
-                log::debug!("Device valid, skipping refresh");
+            if active
+                .is_active()
+                .inspect_err(|e| log::error!("Cannot inspect active: {e}"))?
+            {
+                log::info!("Device valid, skipping refresh");
                 return Ok(());
             } else {
-                log::debug!("Tombstoning existing inactive device");
+                log::info!("Tombstoning existing inactive device");
                 tombstones.push(state.active.take().unwrap());
             }
+        }
+
+        let paths: Vec<Box<[u16]>> = Xeniface::enumerate()
+            .inspect_err(|e| log::error!("Enumerate failed: {e}"))?
+            .iter()
+            .collect();
+
+        if paths.is_empty() {
+            log::info!("Interface list empty");
+            return Err(ERROR_NOT_FOUND.into());
         }
 
         let next = self.open(&paths)?;

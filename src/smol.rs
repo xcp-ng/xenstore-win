@@ -98,6 +98,7 @@ impl Stream for XsWindowsSuspend {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if let Poll::Ready(Ok(_)) = self.waitable.poll_ready(cx) {
+            log::debug!("Got suspend event");
             unsafe {
                 let _ = ResetEvent(HANDLE(self.waitable.get_ref().as_raw_handle()))
                     .inspect_err(|e| log::error!("Unable to reset event handle: {e}"));
@@ -106,10 +107,12 @@ impl Stream for XsWindowsSuspend {
         }
 
         if self.arrival.is_none() {
+            log::debug!("Rearming arrival event");
             self.arrival = self.suspend.listen_arrival().ok();
         }
         if let Some(arrival) = self.arrival.as_mut() {
             if let Poll::Ready(_) = arrival.poll_unpin(cx) {
+                log::debug!("Got arrival event");
                 self.arrival = None;
                 return Poll::Ready(Some(()));
             }

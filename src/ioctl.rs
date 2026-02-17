@@ -169,11 +169,12 @@ impl Xeniface {
         let lock = self.lock()?;
         let handle = lock
             .as_ref()
+            .map(|l| &l.0)
             .ok_or(windows::core::Error::from(ERROR_INVALID_HANDLE))?;
 
         unsafe {
             DeviceIoControl(
-                *(*handle).0,
+                **handle,
                 control_code,
                 Some(in_buffer.as_ptr().cast()),
                 in_buffer.len() as u32,
@@ -203,6 +204,7 @@ impl Xeniface {
     }
 
     pub fn store_directory(&self, path: &str) -> windows::core::Result<Vec<Box<str>>> {
+        log::debug!("store_directory {}", path);
         let in_buffer = make_payload(&[path]);
         let mut out_buffer = vec![0u8; 4096];
 
@@ -222,6 +224,7 @@ impl Xeniface {
     }
 
     pub fn store_read(&self, path: &str) -> windows::core::Result<Box<str>> {
+        log::debug!("store_read {}", path);
         let in_buffer = make_payload(&[path]);
         let mut out_buffer = vec![0u8; 4096];
 
@@ -238,6 +241,7 @@ impl Xeniface {
     }
 
     pub fn store_write(&self, path: &str, data: &str) -> windows::core::Result<()> {
+        log::debug!("store_write {}", path);
         let in_buffer = make_payload(&[path, data]);
 
         unsafe {
@@ -248,6 +252,7 @@ impl Xeniface {
     }
 
     pub fn store_remove(&self, path: &str) -> windows::core::Result<()> {
+        log::debug!("store_remove {}", path);
         let in_buffer = make_payload(&[path]);
 
         unsafe {
@@ -262,6 +267,7 @@ impl Xeniface {
         path: &str,
         event: HANDLE,
     ) -> windows::core::Result<XenifaceStoreAddWatchOut> {
+        log::debug!("add_watch {}", path);
         let c_path = CString::new(path)
             .map_err(|_| windows::core::Error::from_hresult(ERROR_NOT_ENOUGH_MEMORY.into()))?;
         let path_bytes = c_path.to_bytes_with_nul();
@@ -290,6 +296,7 @@ impl Xeniface {
         &self,
         context: &mut XenifaceStoreAddWatchOut,
     ) -> windows::core::Result<()> {
+        log::debug!("remove_watch");
         unsafe {
             self.ioctl::<XenifaceStoreAddWatchOut, c_void>(
                 IOCTL_XENIFACE_STORE_REMOVE_WATCH,
@@ -304,6 +311,7 @@ impl Xeniface {
         &'a self,
         event: HANDLE,
     ) -> windows::core::Result<XenifaceStoreSuspendRegisterOut> {
+        log::debug!("suspend_register");
         let suspend_in = XenifaceStoreSuspendRegisterIn { event: event };
         let mut context = XenifaceStoreSuspendRegisterOut {
             context: std::ptr::null_mut(),
@@ -324,6 +332,7 @@ impl Xeniface {
         &self,
         context: &mut XenifaceStoreSuspendRegisterOut,
     ) -> windows::core::Result<()> {
+        log::debug!("suspend_deregister");
         unsafe {
             self.ioctl::<XenifaceStoreSuspendRegisterOut, c_void>(
                 IOCTL_XENIFACE_SUSPEND_DEREGISTER,

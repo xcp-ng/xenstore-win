@@ -216,6 +216,7 @@ impl MultiplexedXeniface {
     }
 
     pub(crate) fn stop(&self) {
+        log::info!("Stopping worker");
         let (sender, mut worker) = {
             let mut state = self.state.lock().unwrap();
             (state.sender.take(), state.worker.take())
@@ -401,7 +402,7 @@ impl MultiplexedXeniface {
                     return Ok(xeniface);
                 }
                 Err(e) => {
-                    log::warn!("Unable to open {} ({e})", unsafe { wpath.display() })
+                    log::warn!("Unable to open {} ({})", unsafe { wpath.display() }, e);
                 }
             }
         }
@@ -414,6 +415,8 @@ impl MultiplexedXeniface {
         state: &mut MutexGuard<'_, MultiplexState>,
         tombstones: &mut Vec<Arc<Xeniface>>,
     ) -> windows::core::Result<()> {
+        log::info!("Refreshing");
+
         if let Some(active) = state.active.as_ref() {
             if active
                 .is_active()
@@ -495,6 +498,7 @@ impl MultiplexedXeniface {
                 let mut state = self.state.lock().unwrap();
                 match request {
                     XenifaceRequest::Worker(CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) => {
+                        log::info!("CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL");
                         if let Err(e) = self.refresh(&mut state, &mut tombstones) {
                             log::info!("Refresh failed: {e}")
                         }
@@ -503,6 +507,7 @@ impl MultiplexedXeniface {
                         if action == CM_NOTIFY_ACTION_DEVICEREMOVEPENDING
                             || action == CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE
                         {
+                            log::info!("CM_NOTIFY_ACTION_DEVICEREMOVEPENDING/COMPLETE");
                             state.active.take_if(|active| Arc::ptr_eq(&target, active));
                             tombstones.push(target);
                         }
@@ -514,6 +519,7 @@ impl MultiplexedXeniface {
             tombstones.clear();
         }
 
+        log::info!("Worker exiting");
         Ok(())
     }
 }

@@ -499,13 +499,13 @@ impl MultiplexedXeniface {
                             log::info!("Refresh failed: {e}")
                         }
                     }
-                    XenifaceRequest::Listener {
-                        action:
-                            CM_NOTIFY_ACTION_DEVICEREMOVEPENDING | CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE,
-                        target,
-                    } => {
-                        state.active.take_if(|active| Arc::ptr_eq(&target, active));
-                        tombstones.push(target);
+                    XenifaceRequest::Listener { action, target } => {
+                        if action == CM_NOTIFY_ACTION_DEVICEREMOVEPENDING
+                            || action == CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE
+                        {
+                            state.active.take_if(|active| Arc::ptr_eq(&target, active));
+                            tombstones.push(target);
+                        }
                     }
                     _ => {}
                 }

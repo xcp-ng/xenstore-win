@@ -33,7 +33,6 @@ version = "0.8"
 features = ["async"]
 
 [dev-dependencies]
-clap = { version = "4.5.31", features = ["derive"] }
 smol = "2.0.2"
 
 [features]

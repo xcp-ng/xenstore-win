@@ -36,7 +36,7 @@ static XENIFACE: LazyLock<XsWindows> =
 
 impl XsWindows {
     fn new_instance() -> Result<Self> {
-        let iface = MultiplexedXeniface::new();
+        let iface = MultiplexedXeniface::new()?;
         let worker = Arc::new(iface.start());
         Ok(XsWindows { worker, iface })
     }

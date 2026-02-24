@@ -1,16 +1,19 @@
 use std::{
     ffi::c_void,
+    ops::ControlFlow,
     sync::{Arc, Mutex, MutexGuard, Weak},
     thread::JoinHandle,
 };
 
 use event_listener::{Event, EventListener};
-use flume::{Receiver, Sender};
+use flume::{Receiver, Sender, TryRecvError};
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use windows::{
     Win32::{
-        Devices::DeviceAndDriverInstallation::*, Foundation::*, Storage::FileSystem::*,
-        System::Threading::CreateEventW,
+        Devices::DeviceAndDriverInstallation::*,
+        Foundation::*,
+        Storage::FileSystem::*,
+        System::Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects},
     },
     core::PCWSTR,
 };
@@ -21,7 +24,7 @@ use crate::{
         GUID_INTERFACE_XENIFACE, Xeniface, XenifaceStoreAddWatchOut,
         XenifaceStoreSuspendRegisterOut,
     },
-    utils::MyOwned,
+    utils::{MyOwned, UnsafeBorrowed},
 };
 
 pub(crate) enum XenifaceRequest {
@@ -108,6 +111,7 @@ where
     Self: Send + Sync,
 {
     me: Weak<MultiplexedXeniface>,
+    recv_event: MyOwned<HANDLE>,
     state: Mutex<MultiplexState>,
 }
 
@@ -180,9 +184,11 @@ impl Drop for XenifaceWorker {
 }
 
 impl MultiplexedXeniface {
-    pub fn new() -> Arc<Self> {
+    pub fn new() -> windows::core::Result<Arc<Self>> {
+        let recv_event = unsafe { MyOwned::new(CreateEventW(None, true, false, None)?) };
         let result = Arc::new_cyclic(|me| Self {
             me: me.clone(),
+            recv_event,
             state: Mutex::new(MultiplexState {
                 worker: None,
                 active: None,
@@ -192,7 +198,7 @@ impl MultiplexedXeniface {
                 suspends: Default::default(),
             }),
         });
-        result
+        Ok(result)
     }
 
     pub fn start(&self) -> XenifaceWorker {
@@ -208,10 +214,14 @@ impl MultiplexedXeniface {
                 CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL,
             ))
             .unwrap();
+        unsafe { SetEvent(*self.recv_event).unwrap() };
         let ptr = self.me.upgrade().clone().unwrap();
 
+        let recv_event = unsafe { UnsafeBorrowed::new(*self.recv_event) };
         state.sender = Some(sender);
-        state.worker = Some(std::thread::spawn(move || Self::worker(ptr, receiver)));
+        state.worker = Some(std::thread::spawn(move || {
+            Self::worker(ptr, receiver, recv_event)
+        }));
         XenifaceWorker(self.me.clone())
     }
 
@@ -313,7 +323,12 @@ impl MultiplexedXeniface {
                 state.sender.clone()
             };
             if let Some(sender) = sender {
-                let _ = sender.send(XenifaceRequest::Worker(action));
+                if let Ok(_) = sender.send(XenifaceRequest::Worker(action)) {
+                    unsafe {
+                        let _ = SetEvent(*this.recv_event)
+                            .inspect_err(|e| log::error!("Cannot signal recv event: {e}"));
+                    };
+                }
             }
 
             Ok(())
@@ -359,10 +374,15 @@ impl MultiplexedXeniface {
                 state.sender.clone()
             };
             if let Some(sender) = sender {
-                let _ = sender.send(XenifaceRequest::Listener {
+                if let Ok(_) = sender.send(XenifaceRequest::Listener {
                     action,
                     target: child,
-                });
+                }) {
+                    unsafe {
+                        let _ = SetEvent(*parent.recv_event)
+                            .inspect_err(|e| log::error!("Cannot signal recv event: {e}"));
+                    };
+                }
             }
 
             Ok(())
@@ -410,6 +430,44 @@ impl MultiplexedXeniface {
         Err(ERROR_NOT_FOUND.into())
     }
 
+    fn rearm_watches(watches: &mut LinkedList<WatchAdapter>, next: &Arc<Xeniface>) {
+        log::debug!("Rearming watches");
+        watches.iter().for_each(|w| {
+            if let Ok(mut node_lock) = w.state.lock() {
+                match unsafe { next.add_watch(&node_lock.path, *node_lock.event) } {
+                    Ok(watch_out) => {
+                        node_lock.watch.replace((Arc::downgrade(next), watch_out));
+                    }
+                    Err(e) => {
+                        // stale?
+                        log::error!("Failed to rearm watch: {e}");
+                        node_lock.watch.take();
+                    }
+                }
+            }
+        });
+    }
+
+    fn rearm_suspends(suspends: &mut LinkedList<SuspendAdapter>, next: &Arc<Xeniface>) {
+        log::debug!("Rearming suspends");
+        suspends.iter().for_each(|s| {
+            if let Ok(mut node_lock) = s.state.lock() {
+                match unsafe { next.suspend_register(*node_lock.event) } {
+                    Ok(suspend_out) => {
+                        node_lock
+                            .suspend
+                            .replace((Arc::downgrade(&next), suspend_out));
+                    }
+                    Err(e) => {
+                        // stale?
+                        log::error!("Failed to rearm suspend: {e}");
+                        node_lock.suspend.take();
+                    }
+                }
+            }
+        });
+    }
+
     fn refresh(
         &self,
         state: &mut MutexGuard<'_, MultiplexState>,
@@ -443,35 +501,48 @@ impl MultiplexedXeniface {
         let next = self.open(&paths)?;
         state.active = Some(next.clone());
 
-        state.watches.iter().for_each(|w| {
-            if let Ok(mut node_lock) = w.state.lock() {
-                if let Ok(watch_out) = unsafe { next.add_watch(&node_lock.path, *node_lock.event) }
-                {
-                    node_lock.watch.replace((Arc::downgrade(&next), watch_out));
-                } else {
-                    // stale?
-                    node_lock.watch.take();
-                }
-            }
-        });
-        state.suspends.iter().for_each(|s| {
-            if let Ok(mut node_lock) = s.state.lock() {
-                if let Ok(suspend_out) = unsafe { next.suspend_register(*node_lock.event) } {
-                    node_lock
-                        .suspend
-                        .replace((Arc::downgrade(&next), suspend_out));
-                } else {
-                    // stale?
-                    node_lock.suspend.take();
-                }
-            }
-        });
+        Self::rearm_watches(&mut state.watches, &next);
+        Self::rearm_suspends(&mut state.suspends, &next);
         state.arrival.notify(usize::MAX);
 
         Ok(())
     }
 
-    fn worker(self: Arc<Self>, receiver: Receiver<XenifaceRequest>) -> windows::core::Result<()> {
+    fn worker_do_recv(
+        &self,
+        receiver: &Receiver<XenifaceRequest>,
+        tombstones: &mut Vec<Arc<Xeniface>>,
+    ) -> ControlFlow<()> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            match receiver.try_recv() {
+                Ok(XenifaceRequest::Worker(CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL)) => {
+                    log::info!("CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL");
+                    if let Err(e) = self.refresh(&mut state, tombstones) {
+                        log::info!("Refresh failed: {e}")
+                    }
+                }
+                Ok(XenifaceRequest::Listener { action, target }) => {
+                    if action == CM_NOTIFY_ACTION_DEVICEREMOVEPENDING
+                        || action == CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE
+                    {
+                        log::info!("CM_NOTIFY_ACTION_DEVICEREMOVEPENDING/COMPLETE");
+                        state.active.take_if(|active| Arc::ptr_eq(&target, active));
+                        tombstones.push(target);
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return ControlFlow::Break(()),
+                Err(TryRecvError::Empty) => return ControlFlow::Continue(()),
+                _ => (),
+            }
+        }
+    }
+
+    fn worker(
+        self: Arc<Self>,
+        receiver: Receiver<XenifaceRequest>,
+        recv_event: UnsafeBorrowed<HANDLE>,
+    ) -> windows::core::Result<()> {
         let mut tombstones = Vec::<Arc<Xeniface>>::new();
 
         let filter = CM_NOTIFY_FILTER {
@@ -493,27 +564,33 @@ impl MultiplexedXeniface {
             )?
         };
 
-        while let Ok(request) = receiver.recv() {
-            {
-                let mut state = self.state.lock().unwrap();
-                match request {
-                    XenifaceRequest::Worker(CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) => {
-                        log::info!("CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL");
-                        if let Err(e) = self.refresh(&mut state, &mut tombstones) {
-                            log::info!("Refresh failed: {e}")
-                        }
+        let suspend = self.register_suspend()?;
+        let events = [*recv_event, suspend.get_handle()?];
+        loop {
+            match unsafe { WaitForMultipleObjects(&events, false, INFINITE) } {
+                WAIT_EVENT(0) => {
+                    log::debug!("Worker got request event");
+                    unsafe {
+                        let _ = ResetEvent(events[0])
+                            .inspect_err(|e| log::error!("Cannot reset request event: {e}"));
+                    };
+                    if let ControlFlow::Break(_) = self.worker_do_recv(&receiver, &mut tombstones) {
+                        break;
                     }
-                    XenifaceRequest::Listener { action, target } => {
-                        if action == CM_NOTIFY_ACTION_DEVICEREMOVEPENDING
-                            || action == CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE
-                        {
-                            log::info!("CM_NOTIFY_ACTION_DEVICEREMOVEPENDING/COMPLETE");
-                            state.active.take_if(|active| Arc::ptr_eq(&target, active));
-                            tombstones.push(target);
-                        }
-                    }
-                    _ => {}
                 }
+                WAIT_EVENT(1) => {
+                    log::debug!("Worker got suspend event");
+                    unsafe {
+                        let _ = ResetEvent(events[1])
+                            .inspect_err(|e| log::error!("Cannot reset suspend event: {e}"));
+                    };
+                    let state = &mut *self.state.lock().unwrap();
+                    if let Some(active) = state.active.as_mut() {
+                        Self::rearm_watches(&mut state.watches, active);
+                    }
+                }
+                WAIT_FAILED => panic!("{}", windows::core::Error::from_thread()),
+                _ => unreachable!(),
             }
 
             tombstones.clear();

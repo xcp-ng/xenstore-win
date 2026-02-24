@@ -87,6 +87,7 @@ impl<T: Free> DerefMut for MyOwned<T> {
 }
 
 unsafe impl Send for MyOwned<HANDLE> {}
+unsafe impl Sync for MyOwned<HANDLE> {}
 
 pub(crate) struct UnsafeBorrowed<T>(T);
 
@@ -95,8 +96,6 @@ impl<T> UnsafeBorrowed<T> {
         Self(value)
     }
 }
-
-unsafe impl Send for UnsafeBorrowed<HANDLE> {}
 
 impl AsHandle for UnsafeBorrowed<HANDLE> {
     fn as_handle(&self) -> BorrowedHandle<'_> {
@@ -109,3 +108,19 @@ impl AsRawHandle for UnsafeBorrowed<HANDLE> {
         self.0.0
     }
 }
+
+impl<T: Free> Deref for UnsafeBorrowed<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Free> DerefMut for UnsafeBorrowed<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+unsafe impl Send for UnsafeBorrowed<HANDLE> {}
+unsafe impl Sync for UnsafeBorrowed<HANDLE> {}

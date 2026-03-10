@@ -1,6 +1,3 @@
-/// Some NUL-string payload related utilities.
-/// Taken from xenstore-rs wire.rs
-///
 use std::{
     io::Write,
     ops::{Deref, DerefMut},
@@ -24,25 +21,23 @@ pub fn make_payload(strings: &[&str]) -> Box<[u8]> {
     payload.into_boxed_slice()
 }
 
-pub fn parse_nul_string(mut buffer: &[u8]) -> Option<&[u8]> {
-    // Assuming terminating NUL
-    if buffer.is_empty() {
-        None
-    } else {
-        // Discard latest NUL character (if present)
-        if buffer.last() == Some(&0) {
-            buffer = &buffer[..buffer.len() - 1];
+pub fn parse_multi_string(buffer: &[u8]) -> Box<[&[u8]]> {
+    let mut slices = Vec::new();
+    let mut i = 0;
+    while i < buffer.len() {
+        if buffer[i] == 0 {
+            break;
         }
-
-        Some(buffer)
+        let start = i;
+        while i < buffer.len() && buffer[i] != 0 {
+            i += 1;
+        }
+        if i > start {
+            slices.push(&buffer[start..i]);
+        }
+        i += 1;
     }
-}
-
-pub fn parse_nul_list(buffer: &[u8]) -> Box<[&[u8]]> {
-    buffer
-        .split_inclusive(|&c| c == 0)
-        .filter_map(|s| parse_nul_string(s))
-        .collect()
+    slices.into_boxed_slice()
 }
 
 pub(crate) trait Unwrapped {

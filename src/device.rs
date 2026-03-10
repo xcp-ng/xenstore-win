@@ -19,7 +19,7 @@ use crate::{
     cm::CmNotifier,
     devicelist::DeviceInfoList,
     multiplex::MultiplexedXeniface,
-    utils::{MyOwned, Unwrapped, make_payload, parse_nul_list, parse_nul_string},
+    utils::{MyOwned, Unwrapped, make_payload, parse_multi_string, parse_nul_string},
 };
 
 pub const GUID_INTERFACE_XENIFACE: GUID = GUID::from_values(
@@ -217,7 +217,7 @@ impl Xeniface {
         };
         out_buffer.truncate(len as usize);
 
-        Ok(parse_nul_list(&out_buffer)
+        Ok(parse_multi_string(&out_buffer)
             .iter()
             .map(|s| String::from_utf8_lossy(*s).into_owned().into_boxed_str())
             .collect())

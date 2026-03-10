@@ -21,6 +21,20 @@ pub fn make_payload(strings: &[&str]) -> Box<[u8]> {
     payload.into_boxed_slice()
 }
 
+pub fn parse_nul_string(mut buffer: &[u8]) -> Option<&[u8]> {
+    // Assuming terminating NUL
+    if buffer.is_empty() {
+        None
+    } else {
+        // Discard latest NUL character (if present)
+        if buffer.last() == Some(&0) {
+            buffer = &buffer[..buffer.len() - 1];
+        }
+
+        Some(buffer)
+    }
+}
+
 pub fn parse_multi_string(buffer: &[u8]) -> Box<[&[u8]]> {
     let mut slices = Vec::new();
     let mut i = 0;

@@ -38,24 +38,24 @@ pub(crate) enum XenifaceRequest {
 // Note: watches are bound to their underlying devices and not the active device in XsWindows.
 // Therefore, MultiplexedWatchNodeState will need to embed a reference to its parent device.
 
-struct WatchNodeState {
-    watch: Option<(Weak<Xeniface>, XenifaceStoreAddWatchOut)>,
-    event: MyOwned<HANDLE>,
-    path: String,
-}
+struct WatchHandle(Weak<Xeniface>, XenifaceStoreAddWatchOut);
 
-impl Drop for WatchNodeState {
+impl Drop for WatchHandle {
     fn drop(&mut self) {
-        if let Some((weak, mut out)) = self.watch.take() {
-            if let Some(ptr) = weak.upgrade() {
-                if let Ok(true) = ptr.is_active() {
-                    let _ = ptr
-                        .remove_watch(&mut out)
-                        .inspect_err(|e| log::error!("Failed to remove watch: {e}"));
-                }
+        if let Some(ptr) = self.0.upgrade() {
+            if let Ok(true) = ptr.is_active() {
+                let _ = ptr
+                    .remove_watch(&mut self.1)
+                    .inspect_err(|e| log::error!("Failed to remove watch: {e}"));
             }
         }
     }
+}
+
+struct WatchNodeState {
+    watch: Option<WatchHandle>,
+    event: MyOwned<HANDLE>,
+    path: String,
 }
 
 struct WatchNode
@@ -68,23 +68,23 @@ where
 
 intrusive_adapter!(WatchAdapter = Arc<WatchNode>: WatchNode { link => LinkedListAtomicLink });
 
-struct SuspendNodeState {
-    suspend: Option<(Weak<Xeniface>, XenifaceStoreSuspendRegisterOut)>,
-    event: MyOwned<HANDLE>,
-}
+struct SuspendHandle(Weak<Xeniface>, XenifaceStoreSuspendRegisterOut);
 
-impl Drop for SuspendNodeState {
+impl Drop for SuspendHandle {
     fn drop(&mut self) {
-        if let Some((weak, mut out)) = self.suspend.take() {
-            if let Some(ptr) = weak.upgrade() {
-                if let Ok(true) = ptr.is_active() {
-                    let _ = ptr
-                        .suspend_deregister(&mut out)
-                        .inspect_err(|e| log::error!("Failed to remove suspend: {e}"));
-                }
+        if let Some(ptr) = self.0.upgrade() {
+            if let Ok(true) = ptr.is_active() {
+                let _ = ptr
+                    .suspend_deregister(&mut self.1)
+                    .inspect_err(|e| log::error!("Failed to remove suspend: {e}"));
             }
         }
     }
+}
+
+struct SuspendNodeState {
+    suspend: Option<SuspendHandle>,
+    event: MyOwned<HANDLE>,
 }
 
 struct SuspendNode
@@ -271,7 +271,9 @@ impl MultiplexedXeniface {
         if let Some(active) = state.active.as_ref() {
             let mut node_lock = node.state.lock().unwrap();
             let watch_out = unsafe { active.add_watch(path, handle)? };
-            node_lock.watch.replace((Arc::downgrade(active), watch_out));
+            node_lock
+                .watch
+                .replace(WatchHandle(Arc::downgrade(active), watch_out));
         }
 
         state.watches.push_back(node.clone());
@@ -295,7 +297,7 @@ impl MultiplexedXeniface {
             let suspend_out = unsafe { active.suspend_register(handle)? };
             node_lock
                 .suspend
-                .replace((Arc::downgrade(active), suspend_out));
+                .replace(SuspendHandle(Arc::downgrade(active), suspend_out));
         }
 
         state.suspends.push_back(node.clone());
@@ -436,7 +438,9 @@ impl MultiplexedXeniface {
             if let Ok(mut node_lock) = w.state.lock() {
                 match unsafe { next.add_watch(&node_lock.path, *node_lock.event) } {
                     Ok(watch_out) => {
-                        node_lock.watch.replace((Arc::downgrade(next), watch_out));
+                        node_lock
+                            .watch
+                            .replace(WatchHandle(Arc::downgrade(next), watch_out));
                     }
                     Err(e) => {
                         // stale?
@@ -456,7 +460,7 @@ impl MultiplexedXeniface {
                     Ok(suspend_out) => {
                         node_lock
                             .suspend
-                            .replace((Arc::downgrade(&next), suspend_out));
+                            .replace(SuspendHandle(Arc::downgrade(&next), suspend_out));
                     }
                     Err(e) => {
                         // stale?
